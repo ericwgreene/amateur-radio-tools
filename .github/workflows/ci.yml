@@ -58,3 +58,12 @@ jobs:
           name: coverage-lcov
           path: lcov.info
           if-no-files-found: ignore
+
+  # Compile + lint the Bicep template. `az` is preinstalled on ubuntu-latest and
+  # `az bicep build` runs offline (no Azure login), failing the job on template errors.
+  bicep-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bicep build (compile + lint)
+        run: az bicep build --file infra/main.bicep --stdout > /dev/null
