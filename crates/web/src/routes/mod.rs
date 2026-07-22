@@ -49,3 +49,28 @@ pub fn configure(cfg: &mut ServiceConfig) {
     // Anything else → 404 page.
     cfg.default_service(web::route().to(not_found));
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::test_support::{test_app, test_state};
+    use actix_web::test;
+
+    #[actix_web::test]
+    async fn health_returns_ok() {
+        let state = test_state().await;
+        let app = test_app!(state);
+        let req = test::TestRequest::get().uri("/health").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        assert_eq!(test::read_body(resp).await.as_ref(), b"ok");
+    }
+
+    #[actix_web::test]
+    async fn unknown_route_renders_404() {
+        let state = test_state().await;
+        let app = test_app!(state);
+        let req = test::TestRequest::get().uri("/does-not-exist").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 404);
+    }
+}

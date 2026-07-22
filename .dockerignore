@@ -1,0 +1,18 @@
+# Keep the build context small and the cargo-chef cache key stable (only source /
+# Cargo.lock should invalidate it). Everything needed by the image — Cargo.*, crates/,
+# and crates/web/static — is retained.
+.git
+.github
+target
+node_modules
+data
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.local
+infra
+*.bicep
+**/*.md
+.DS_Store
+*.swp
