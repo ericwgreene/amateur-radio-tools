@@ -1,0 +1,93 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# OIDC federated login to Azure needs id-token: write.
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      ACR: ${{ vars.ACR_NAME }}
+      RG: ${{ vars.RESOURCE_GROUP }}
+      APP: ${{ vars.CONTAINERAPP_NAME }}
+      JOB: ${{ vars.MIGRATION_JOB_NAME }}
+      FQDN: ${{ vars.CONTAINERAPP_FQDN }}
+      IMAGE_REPO: amateur-radio-tools
+      IMAGE_TAG: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Until the infra is provisioned and repo variables are set, this workflow is a
+      # graceful no-op instead of a red failure. See docs/DEPLOY.md.
+      - id: check
+        run: |
+          if [ -z "${{ vars.AZURE_CLIENT_ID }}" ]; then
+            echo "Azure deploy not configured (AZURE_CLIENT_ID unset) — skipping." >> "$GITHUB_STEP_SUMMARY"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Azure login (OIDC)
+        if: steps.check.outputs.configured == 'true'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Ensure containerapp CLI extension
+        if: steps.check.outputs.configured == 'true'
+        run: az config set extension.use_dynamic_install=yes_without_prompt
+
+      # Server-side build in ACR — no local Docker/buildx/QEMU on the runner.
+      - name: Build & push image (az acr build)
+        if: steps.check.outputs.configured == 'true'
+        run: az acr build -r "$ACR" -t "$IMAGE_REPO:$IMAGE_TAG" -t "$IMAGE_REPO:latest" .
+
+      # Apply migrations via the Container Apps Job before rolling the app, so the app's
+      # on-boot migration is a harmless no-op (no multi-replica race).
+      - name: Run database migrations (Container Apps Job)
+        if: steps.check.outputs.configured == 'true'
+        run: |
+          set -euo pipefail
+          IMG="$ACR.azurecr.io/$IMAGE_REPO:$IMAGE_TAG"
+          az containerapp job update -g "$RG" -n "$JOB" --image "$IMG" >/dev/null
+          EXEC=$(az containerapp job start -g "$RG" -n "$JOB" --query name -o tsv)
+          echo "Migration execution: $EXEC"
+          for _ in $(seq 1 60); do
+            STATUS=$(az containerapp job execution show -g "$RG" -n "$JOB" \
+              --job-execution-name "$EXEC" --query properties.status -o tsv 2>/dev/null || echo "Unknown")
+            echo "  status: $STATUS"
+            case "$STATUS" in
+              Succeeded) exit 0 ;;
+              Failed|Degraded|Cancelled) echo "Migration job failed"; exit 1 ;;
+            esac
+            sleep 10
+          done
+          echo "Timed out waiting for migration job"; exit 1
+
+      - name: Roll out new image
+        if: steps.check.outputs.configured == 'true'
+        run: az containerapp update -g "$RG" -n "$APP" --image "$ACR.azurecr.io/$IMAGE_REPO:$IMAGE_TAG" >/dev/null
+
+      - name: Smoke test /health
+        if: steps.check.outputs.configured == 'true' && env.FQDN != ''
+        run: |
+          for _ in $(seq 1 10); do
+            if curl -fsS "https://$FQDN/health"; then echo "OK"; exit 0; fi
+            sleep 6
+          done
+          echo "Health check failed"; exit 1
