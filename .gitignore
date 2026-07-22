@@ -1,0 +1,19 @@
+# Rust
+/target
+
+# Local database files
+/data
+*.db
+*.db-shm
+*.db-wal
+
+# Node (Tailwind CLI)
+/node_modules
+
+# Environment / secrets
+.env
+.env.local
+
+# Editor/OS noise
+.DS_Store
+*.swp
