@@ -70,4 +70,37 @@ block content %}
     Enter coordinates and press <span class="font-medium">Convert</span>.
   </div>
 </section>
+
+<section class="mt-6 rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+  <h2 class="text-xl font-semibold text-slate-900">Callsign Lookup</h2>
+  <p class="mt-1 text-sm text-slate-600">
+    Resolve the DXCC entity (country) for a callsign. Also updates live via HTMX.
+  </p>
+
+  <form
+    hx-post="/tools/callsign"
+    hx-target="#callsign-result"
+    hx-swap="innerHTML"
+    class="mt-4 flex flex-col gap-3 sm:flex-row"
+  >
+    <input
+      name="callsign"
+      type="text"
+      autocomplete="off"
+      value="W1AW"
+      required
+      class="w-full rounded-md border border-slate-300 px-3 py-2 font-mono uppercase shadow-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:outline-none sm:max-w-xs"
+    />
+    <button
+      type="submit"
+      class="rounded-md bg-indigo-600 px-4 py-2 font-medium text-white shadow-sm hover:bg-indigo-500 focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 focus:outline-none"
+    >
+      Look up
+    </button>
+  </form>
+
+  <div id="callsign-result" class="mt-4 min-h-6 text-sm text-slate-500">
+    Enter a callsign and press <span class="font-medium">Look up</span>.
+  </div>
+</section>
 {% endblock %}

@@ -8,6 +8,10 @@
       <a href="/" class="text-slate-600 hover:text-slate-900">Home</a>
       {% if let Some(user) = current_user %}
       <a href="/dashboard" class="text-slate-600 hover:text-slate-900">Dashboard</a>
+      <a href="/logbook" class="text-slate-600 hover:text-slate-900">Logbook</a>
+      <a href="/settings/tokens" class="hidden text-slate-600 hover:text-slate-900 sm:inline"
+        >API&nbsp;tokens</a
+      >
       {% if user.is_admin() %}
       <a href="/admin" class="text-slate-600 hover:text-slate-900">Admin</a>
       {% endif %}

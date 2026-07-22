@@ -1,6 +1,7 @@
 //! Amateur Radio Tools — an Actix Web application, server-rendered with Askama and
 //! progressively enhanced with HTMX, using Auth0 (OIDC) for authentication.
 
+mod api;
 mod auth;
 mod config;
 mod error;
@@ -80,6 +81,8 @@ async fn main() -> Result<()> {
     HttpServer::new(move || {
         App::new()
             .app_data(state.clone())
+            // Make malformed JSON request bodies (API) return a JSON error, not HTML.
+            .app_data(web::JsonConfig::default().error_handler(json_error_handler))
             .wrap(TracingLogger::default())
             .wrap(
                 SessionMiddleware::builder(CookieSessionStore::default(), session_key.clone())
@@ -99,6 +102,17 @@ async fn main() -> Result<()> {
     .run()
     .await
     .context("server error")
+}
+
+/// Turn a JSON body-parsing failure into our JSON `ApiError` shape.
+fn json_error_handler(
+    err: actix_web::error::JsonPayloadError,
+    _req: &actix_web::HttpRequest,
+) -> actix_web::Error {
+    use actix_web::ResponseError;
+    let response = crate::api::error::ApiError::BadRequest(format!("invalid JSON body: {err}"))
+        .error_response();
+    actix_web::error::InternalError::from_response(err, response).into()
 }
 
 fn init_tracing() {

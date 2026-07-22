@@ -18,18 +18,42 @@ disabled), so you can start immediately and wire up Auth0 when you're ready.
 
 ---
 
-## What's included (the walking skeleton)
+## What's included
+
+### Browser (server-rendered + HTMX)
 
 | Route | Auth | Description |
 |-------|------|-------------|
-| `GET /` | public | Home page. Hosts the **Maidenhead grid-square** tool (an HTMX partial-update demo). |
-| `POST /tools/grid` | public | HTMX endpoint: converts lat/long → Maidenhead locator, returns an HTML fragment. |
-| `GET /dashboard` | **required** | The signed-in user's profile & account timestamps (reads the local DB). |
+| `GET /` | public | Home page. Hosts the **Maidenhead grid-square** and **callsign lookup** tools (HTMX partial-update demos). |
+| `POST /tools/grid` | public | HTMX: converts lat/long → Maidenhead locator. |
+| `POST /tools/callsign` | public | HTMX: resolves a callsign's country/continent. |
+| `GET /dashboard` | **required** | The signed-in user's profile & account timestamps. |
+| `GET /logbook` | **required** | The **logbook**: list contacts, add one (with live callsign lookup), delete — all via HTMX. |
+| `POST /logbook`, `DELETE /logbook/{id}` | **required** | Add / remove a contact; return the refreshed table body. |
+| `GET /settings/tokens` | **required** | Create & revoke **API tokens**. |
+| `POST /settings/tokens`, `POST /settings/tokens/{id}/revoke` | **required** | Manage tokens (the secret is shown once). |
 | `GET /admin` | **role: `admin`** | Lists all users — demonstrates role-based authorization. |
-| `GET /login` | — | Starts the Auth0 login flow. |
-| `GET /auth/callback` | — | OIDC redirect URI: verifies the ID token, upserts the user, sets the session. |
-| `GET /logout` | — | Clears the session and ends the Auth0 session. |
+| `GET /login` · `GET /auth/callback` · `GET /logout` | — | Auth0 OIDC login / callback / logout. |
 | `GET /health` | — | Liveness probe. |
+
+### REST API (JSON, token-authenticated)
+
+| Route | Description |
+|-------|-------------|
+| `POST /api/v1/contacts` | Log a contact. |
+| `GET /api/v1/contacts` | List the caller's contacts. |
+| `GET /api/v1/contacts/{id}` | Fetch one of the caller's contacts. |
+| `GET /api/v1/me` | Identify the token's owner (handy for verifying a token). |
+
+See [REST API](#rest-api) below.
+
+### A note on the login form
+
+There is **no custom username/password form** — and there shouldn't be. Auth0 hosts the
+login experience (Universal Login), so `/login` simply redirects to Auth0, which handles
+credentials, social logins, and MFA. Building an in-app credential form would mean using the
+discouraged Resource Owner Password grant and taking on password handling yourself. The
+"Log in" button in the nav is all that's needed.
 
 ---
 
@@ -44,7 +68,7 @@ amateur-radio-tools/
 ├── package.json               # Tailwind CSS build scripts
 ├── .env.example               # documented configuration
 └── crates/
-    ├── entity/                # SeaORM entities (the `users` table)
+    ├── entity/                # SeaORM entities: users, contacts, api_tokens
     ├── migration/             # backend-agnostic migrations + a CLI runner
     └── web/                   # the Actix Web application
         ├── src/
@@ -52,9 +76,11 @@ amateur-radio-tools/
         │   ├── config.rs      # environment configuration
         │   ├── state.rs       # shared AppState (DB, config, Auth0 client)
         │   ├── error.rs       # AppError + HTML error rendering
-        │   ├── auth/          # Auth0 OIDC client, session, login/callback/logout
-        │   ├── routes/        # page + HTMX-partial handlers
-        │   └── tools/         # domain logic (Maidenhead), unit-tested, web-free
+        │   ├── auth/          # OIDC client, session, role checks, API tokens
+        │   ├── api/           # JSON REST API (/api/v1/*) + JSON error type
+        │   ├── routes/        # pages, HTMX partials, logbook, settings
+        │   └── tools/         # domain logic (Maidenhead, callsign), unit-tested
+        ├── examples/seed.rs   # dev-only: mint a user + API token for local API testing
         ├── templates/         # Askama templates (layout, pages, partials)
         ├── assets/            # Tailwind input CSS
         └── static/            # built app.css + vendored htmx.min.js (served at /static)
@@ -167,10 +193,53 @@ No application code changes are required.
 
 ---
 
+## REST API
+
+The API lets external applications (logging software, scripts, a station computer) record
+contacts without the browser. It is authenticated with **personal API tokens** rather than
+the browser session, because a logging program acts *as a specific user* and typically can't
+run an interactive OAuth flow. (Auth0 remains the identity provider for humans in the
+browser; tokens are the machine-to-machine complement.)
+
+**Create a token:** sign in, go to **API tokens** (`/settings/tokens`), and create one. The
+secret is shown once — copy it immediately.
+
+**Use it:** send it as a bearer token.
+
+```bash
+# Verify a token
+curl -H "Authorization: Bearer <token>" http://localhost:8080/api/v1/me
+
+# Log a contact (only `callsign` is required; the country is auto-resolved)
+curl -X POST http://localhost:8080/api/v1/contacts \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"callsign":"W1AW","band":"20m","mode":"SSB","frequency_mhz":14.074,"rst_sent":"59","rst_received":"59"}'
+
+# List your contacts
+curl -H "Authorization: Bearer <token>" http://localhost:8080/api/v1/contacts
+```
+
+Tokens are stored only as a SHA-256 hash; missing/invalid tokens get a `401` with a JSON
+body (`{"error":"unauthorized", ...}`), and malformed request bodies get a `400`.
+
+### Testing the API without Auth0
+
+Since a token is tied to a user, you normally need to log in first. For local development
+without an Auth0 tenant, a seeding example mints a user + token directly:
+
+```bash
+cargo run -p web --example seed          # prints: API_TOKEN=art_...
+```
+
+Then use the printed token against a locally running server.
+
+---
+
 ## Testing, formatting, linting
 
 ```bash
-cargo test --workspace     # includes the Maidenhead locator unit tests
+cargo test --workspace     # domain logic: Maidenhead, callsign, token hashing, datetime
 cargo fmt --all
 cargo clippy --workspace --all-targets
 ```

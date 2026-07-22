@@ -1,0 +1,18 @@
+<div
+  class="rounded-md bg-amber-50 px-4 py-4 ring-1 ring-inset ring-amber-200"
+  role="alert"
+>
+  <div class="font-medium text-amber-900">Token “{{ name }}” created</div>
+  <p class="mt-1 text-sm text-amber-800">
+    Copy it now — for your security it will not be shown again.
+  </p>
+  <code
+    class="mt-2 block rounded border border-amber-200 bg-white px-3 py-2 font-mono text-sm break-all text-slate-900 select-all"
+    >{{ raw_token }}</code
+  >
+</div>
+
+<!-- Out-of-band: refresh the token list without a page reload. -->
+<div id="tokens-list" hx-swap-oob="true">
+  {% include "partials/token_rows.html" %}
+</div>

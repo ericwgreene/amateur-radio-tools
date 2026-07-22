@@ -1,7 +1,9 @@
 //! HTTP route handlers and their Askama templates.
 
+pub mod logbook;
 pub mod pages;
 pub mod partials;
+pub mod settings;
 
 use actix_web::web::ServiceConfig;
 use actix_web::{HttpResponse, get, web};
@@ -21,17 +23,29 @@ async fn not_found() -> Result<HttpResponse, AppError> {
 
 /// Register every route on the application. Called from `main` inside the app factory.
 pub fn configure(cfg: &mut ServiceConfig) {
-    cfg.service(health)
+    cfg
         // Pages
+        .service(health)
         .service(pages::index)
         .service(pages::dashboard)
         .service(pages::admin)
+        .service(logbook::logbook_page)
+        .service(logbook::add_contact)
+        .service(logbook::delete_contact)
+        .service(settings::tokens_page)
+        .service(settings::create_token)
+        .service(settings::revoke_token)
         // HTMX partials
         .service(partials::grid_tool)
-        // Auth
+        .service(partials::callsign_tool)
+        // Auth (browser / OIDC)
         .service(crate::auth::handlers::login)
         .service(crate::auth::handlers::callback)
-        .service(crate::auth::handlers::logout)
-        // Anything else → 404 page.
-        .default_service(web::route().to(not_found));
+        .service(crate::auth::handlers::logout);
+
+    // REST API (token-authenticated, JSON).
+    crate::api::configure(cfg);
+
+    // Anything else → 404 page.
+    cfg.default_service(web::route().to(not_found));
 }

@@ -6,7 +6,7 @@ use askama::Template;
 use askama_web::WebTemplate;
 use serde::Deserialize;
 
-use crate::tools::maidenhead;
+use crate::tools::{callsign, maidenhead};
 
 #[derive(Debug, Deserialize)]
 pub struct GridForm {
@@ -70,5 +70,53 @@ pub async fn grid_tool(form: web::Form<GridForm>) -> GridResultTemplate {
             lon: form.lon,
         },
         Err(e) => GridResultTemplate::failure(&form.lat, &form.lon, e.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CallsignForm {
+    callsign: String,
+}
+
+/// Rendered fragment for the callsign lookup result. Doubles as the live "hint" shown
+/// under the callsign field in the logbook add-form.
+#[derive(Template, WebTemplate)]
+#[template(path = "partials/callsign_result.html")]
+struct CallsignResultTemplate {
+    callsign: String,
+    country: Option<String>,
+    continent: Option<String>,
+    error: Option<String>,
+}
+
+/// `POST /tools/callsign` — resolve a callsign's country/continent and return a fragment.
+#[post("/tools/callsign")]
+pub async fn callsign_tool(form: web::Form<CallsignForm>) -> CallsignResultTemplate {
+    let raw = form.into_inner().callsign;
+    let normalized = callsign::normalize(&raw);
+
+    // Empty input → an empty fragment (nothing to show yet).
+    if normalized.is_empty() {
+        return CallsignResultTemplate {
+            callsign: raw,
+            country: None,
+            continent: None,
+            error: None,
+        };
+    }
+
+    match callsign::lookup(&normalized) {
+        Ok(info) => CallsignResultTemplate {
+            callsign: info.callsign,
+            country: Some(info.country),
+            continent: Some(info.continent),
+            error: None,
+        },
+        Err(e) => CallsignResultTemplate {
+            callsign: normalized,
+            country: None,
+            continent: None,
+            error: Some(e.to_string()),
+        },
     }
 }

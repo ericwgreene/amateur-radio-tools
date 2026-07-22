@@ -4,5 +4,7 @@
 //! so both the `migration` crate and the `web` application can depend on them without
 //! creating a dependency cycle, and so entities can be regenerated with `sea-orm-cli`.
 
+pub mod api_tokens;
+pub mod contacts;
 pub mod prelude;
 pub mod users;
