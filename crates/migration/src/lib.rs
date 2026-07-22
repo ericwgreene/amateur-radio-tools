@@ -7,12 +7,18 @@
 pub use sea_orm_migration::prelude::*;
 
 mod m20250722_000001_create_users;
+mod m20250722_000002_create_contacts;
+mod m20250722_000003_create_api_tokens;
 
 pub struct Migrator;
 
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(m20250722_000001_create_users::Migration)]
+        vec![
+            Box::new(m20250722_000001_create_users::Migration),
+            Box::new(m20250722_000002_create_contacts::Migration),
+            Box::new(m20250722_000003_create_api_tokens::Migration),
+        ]
     }
 }

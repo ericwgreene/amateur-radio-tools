@@ -1,0 +1,11 @@
+{% if let Some(err) = error %}
+<span class="text-sm text-rose-600">{{ err }}</span>
+{% else %}{% if let Some(country) = country %}
+<span class="inline-flex items-center gap-1.5 text-sm text-slate-700">
+  <span aria-hidden="true">🌍</span>
+  <span class="font-mono font-semibold text-slate-900">{{ callsign }}</span>
+  <span class="text-slate-400">→</span>
+  <span class="font-medium">{{ country }}</span>
+  {% if let Some(cont) = continent %}<span class="text-slate-400">({{ cont }})</span>{% endif %}
+</span>
+{% endif %}{% endif %}
