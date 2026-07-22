@@ -1,0 +1,18 @@
+@import "tailwindcss";
+
+/* Scan the Askama templates for utility class names. Path is relative to this file. */
+@source "../templates";
+
+/*
+ * HTMX request indicator.
+ * Anything with `.htmx-indicator` is hidden until an HTMX request that targets it (or
+ * whose element carries it) is in flight, at which point HTMX adds `.htmx-request`.
+ */
+.htmx-indicator {
+  opacity: 0;
+  transition: opacity 150ms ease-in;
+}
+.htmx-request .htmx-indicator,
+.htmx-request.htmx-indicator {
+  opacity: 1;
+}

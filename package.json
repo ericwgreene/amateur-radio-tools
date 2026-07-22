@@ -1,0 +1,14 @@
+{
+  "name": "amateur-radio-tools",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Front-end asset build (Tailwind CSS) for the Amateur Radio Tools app.",
+  "scripts": {
+    "build:css": "tailwindcss -i ./crates/web/assets/tailwind.css -o ./crates/web/static/css/app.css --minify",
+    "watch:css": "tailwindcss -i ./crates/web/assets/tailwind.css -o ./crates/web/static/css/app.css --watch"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4",
+    "tailwindcss": "^4"
+  }
+}
