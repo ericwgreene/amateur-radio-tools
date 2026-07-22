@@ -1,4 +1,4 @@
-//! Personal API tokens: generation, hashing, and the `ApiUser` bearer-token extractor.
+//! Personal API tokens: generation, hashing, and the `ApiUser` request extractor.
 //!
 //! Tokens let an external application authenticate as a user for the REST API. The raw
 //! token is only ever seen once (at creation); we persist just its SHA-256 hash. Because
@@ -64,7 +64,7 @@ impl FromRequest for ApiUser {
     type Future = Pin<Box<dyn Future<Output = Result<Self, Self::Error>>>>;
 
     fn from_request(req: &HttpRequest, _payload: &mut Payload) -> Self::Future {
-        let presented = bearer_token(req);
+        let presented = token_from_request(req);
         let state = req.app_data::<web::Data<AppState>>().cloned();
 
         Box::pin(async move {
@@ -95,19 +95,71 @@ impl FromRequest for ApiUser {
     }
 }
 
-/// Extract a bearer token from the `Authorization` header.
-fn bearer_token(req: &HttpRequest) -> Option<String> {
-    let value = req.headers().get(header::AUTHORIZATION)?.to_str().ok()?;
-    let token = value
-        .strip_prefix("Bearer ")
-        .or_else(|| value.strip_prefix("bearer "))?
-        .trim();
-    (!token.is_empty()).then(|| token.to_string())
+/// Extract the API token from a request.
+///
+/// The `Authorization: Bearer <token>` header is preferred. As a fallback — for clients
+/// that can't set custom headers — the token may also be supplied as the `api_key`
+/// query-string parameter (e.g. `?api_key=art_...`). If both are present, the header wins.
+///
+/// Credentials in the URL are more exposed than in a header (they appear in server/proxy
+/// access logs and browser history), so the header remains the recommended path.
+fn token_from_request(req: &HttpRequest) -> Option<String> {
+    // 1. Authorization header (preferred).
+    if let Some(value) = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Some(token) = value
+            .strip_prefix("Bearer ")
+            .or_else(|| value.strip_prefix("bearer "))
+        {
+            let token = token.trim();
+            if !token.is_empty() {
+                return Some(token.to_string());
+            }
+        }
+    }
+
+    // 2. `api_key` query-string parameter (fallback).
+    url::form_urlencoded::parse(req.query_string().as_bytes())
+        .find(|(key, _)| key == "api_key")
+        .map(|(_, value)| value.trim().to_string())
+        .filter(|token| !token.is_empty())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use actix_web::test::TestRequest;
+
+    #[test]
+    fn reads_token_from_authorization_header() {
+        let req = TestRequest::default()
+            .insert_header(("Authorization", "Bearer art_headertoken"))
+            .to_http_request();
+        assert_eq!(token_from_request(&req).as_deref(), Some("art_headertoken"));
+    }
+
+    #[test]
+    fn reads_token_from_api_key_query_param() {
+        let req = TestRequest::with_uri("/api/v1/me?api_key=art_querytoken").to_http_request();
+        assert_eq!(token_from_request(&req).as_deref(), Some("art_querytoken"));
+    }
+
+    #[test]
+    fn header_takes_precedence_over_query() {
+        let req = TestRequest::with_uri("/api/v1/me?api_key=art_query")
+            .insert_header(("Authorization", "Bearer art_header"))
+            .to_http_request();
+        assert_eq!(token_from_request(&req).as_deref(), Some("art_header"));
+    }
+
+    #[test]
+    fn no_token_when_absent() {
+        let req = TestRequest::default().to_http_request();
+        assert_eq!(token_from_request(&req), None);
+    }
 
     #[test]
     fn tokens_are_prefixed_and_hashed() {
