@@ -54,7 +54,9 @@ endblock %} {% block content %}
   -d '{"callsign":"W1AW","band":"20m","mode":"SSB","frequency_mhz":14.074}'</code></pre>
   <p class="mt-2 text-xs text-slate-500">
     Other endpoints: <code>GET /api/v1/contacts</code> (list yours) and
-    <code>GET /api/v1/me</code> (verify a token).
+    <code>GET /api/v1/me</code> (verify a token). Clients that can't set headers
+    may pass <code>?api_key=&lt;token&gt;</code> instead, though the header is more
+    secure.
   </p>
 </section>
 {% endblock %}

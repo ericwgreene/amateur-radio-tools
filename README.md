@@ -220,6 +220,17 @@ curl -X POST http://localhost:8080/api/v1/contacts \
 curl -H "Authorization: Bearer <token>" http://localhost:8080/api/v1/contacts
 ```
 
+**Header vs. query string.** The `Authorization: Bearer` header is the preferred method.
+For clients that can't set custom headers, the token may instead be passed as the `api_key`
+query parameter; if both are present, the header wins.
+
+```bash
+curl "http://localhost:8080/api/v1/me?api_key=<token>"
+```
+
+> Prefer the header where you can: credentials in the URL are more exposed than in a header
+> — they end up in server/proxy access logs and browser history.
+
 Tokens are stored only as a SHA-256 hash; missing/invalid tokens get a `401` with a JSON
 body (`{"error":"unauthorized", ...}`), and malformed request bodies get a `400`.
 
