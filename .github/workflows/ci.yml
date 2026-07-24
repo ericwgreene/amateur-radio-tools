@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  pull_request:
+  # Also run on pushes to main so the default branch always has a fresh status.
+  push:
+    branches: [main]
+
+# No Azure access from PRs — read-only checkout is all that's needed.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-test-coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy, llvm-tools-preview
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Tests run against in-memory SQLite — no PostgreSQL, no network, no Node needed.
+      # ubuntu-latest ships gcc, which satisfies `ring` and bundled `libsqlite3-sys`.
+      # The gate FAILS the job below 80% line coverage. Excluded from the denominator:
+      # the binary bootstrap, the Auth0 network paths (oidc/handlers), generated entity
+      # code, the migration crate, the seed example, and the test-only modules.
+      - name: Tests + coverage gate (>= 80% lines)
+        run: >
+          cargo llvm-cov -p web
+          --ignore-filename-regex '(crates/web/src/main\.rs|crates/web/src/auth/oidc\.rs|crates/web/src/auth/handlers\.rs|crates/web/src/test_support\.rs|crates/web/src/tests_integration\.rs|crates/web/examples/|crates/migration/|crates/entity/)'
+          --fail-under-lines 80
+          --lcov --output-path lcov.info
+
+      - name: Upload coverage (lcov)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          if-no-files-found: ignore
+
+  # Compile + lint the Bicep template. `az` is preinstalled on ubuntu-latest and
+  # `az bicep build` runs offline (no Azure login), failing the job on template errors.
+  bicep-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bicep build (compile + lint)
+        run: az bicep build --file infra/main.bicep --stdout > /dev/null
