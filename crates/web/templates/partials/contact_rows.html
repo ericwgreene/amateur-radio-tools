@@ -1,24 +1,24 @@
 {% if contacts.is_empty() %}
 <tr>
-  <td colspan="10" class="px-4 py-10 text-center text-slate-400">
+  <td colspan="10" class="px-4 py-10 text-center text-slate-500">
     No contacts logged yet — add your first QSO above.
   </td>
 </tr>
 {% else %} {% for c in contacts %}
-<tr class="hover:bg-slate-50">
-  <td class="px-3 py-2 whitespace-nowrap text-slate-500">{{ c.worked_at }}</td>
-  <td class="px-3 py-2 font-mono font-semibold text-slate-900">{{ c.callsign }}</td>
-  <td class="px-3 py-2 text-slate-700">{{ c.country }}</td>
-  <td class="px-3 py-2 text-slate-700">{{ c.band }}</td>
-  <td class="px-3 py-2 text-slate-700">{{ c.mode }}</td>
-  <td class="px-3 py-2 text-slate-700">{{ c.frequency }}</td>
-  <td class="px-3 py-2 whitespace-nowrap text-slate-700">{{ c.rst }}</td>
-  <td class="px-3 py-2 font-mono text-slate-700">{{ c.grid }}</td>
-  <td class="px-3 py-2 text-slate-700">{{ c.name }}</td>
+<tr class="hover:bg-slate-800/50">
+  <td class="px-3 py-2 whitespace-nowrap text-slate-400">{{ c.worked_at }}</td>
+  <td class="px-3 py-2 font-mono font-semibold text-slate-100">{{ c.callsign }}</td>
+  <td class="px-3 py-2 text-slate-300">{{ c.country }}</td>
+  <td class="px-3 py-2 text-slate-300">{{ c.band }}</td>
+  <td class="px-3 py-2 text-slate-300">{{ c.mode }}</td>
+  <td class="px-3 py-2 text-slate-300">{{ c.frequency }}</td>
+  <td class="px-3 py-2 whitespace-nowrap text-slate-300">{{ c.rst }}</td>
+  <td class="px-3 py-2 font-mono text-slate-300">{{ c.grid }}</td>
+  <td class="px-3 py-2 text-slate-300">{{ c.name }}</td>
   <td class="px-3 py-2 text-right">
     <button
       type="button"
-      class="rounded px-2 py-1 text-rose-600 hover:bg-rose-50 hover:text-rose-800"
+      class="rounded px-2 py-1 text-rose-400 hover:bg-rose-500/15 hover:text-rose-300"
       hx-delete="/logbook/{{ c.id }}"
       hx-target="#contacts-body"
       hx-swap="innerHTML"

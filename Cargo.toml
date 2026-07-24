@@ -43,7 +43,15 @@ sea-orm-migration = { version = "2", features = [
 # --- Auth0 / OpenID Connect ---
 # openidconnect 4 pins reqwest 0.12; we use the same version so the HTTP client types
 # line up between our code and the OIDC library.
-openidconnect = { version = "4", features = ["reqwest"] }
+#
+# `accept-rfc3339-timestamps` is required for Auth0: the OIDC spec says `updated_at` is a
+# NumberDate (Unix seconds), but Auth0 emits an RFC 3339 string. Without this feature the
+# ID token fails to deserialize and the token exchange reports "Failed to parse server
+# response".
+openidconnect = { version = "4", features = [
+    "reqwest",
+    "accept-rfc3339-timestamps",
+] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 # --- Serialization ---

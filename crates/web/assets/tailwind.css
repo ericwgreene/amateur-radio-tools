@@ -4,6 +4,43 @@
 @source "../templates";
 
 /*
+ * Dark theme.
+ *
+ * The site renders dark unconditionally, so rather than pairing every utility
+ * with a `dark:` variant the templates just use the dark end of the slate
+ * palette directly. `color-scheme` is what tells the browser to render the
+ * chrome it owns — scrollbars, the datetime-local picker, `<datalist>` popups,
+ * form control defaults — in dark too; without it those show up as bright
+ * white rectangles on an otherwise dark page.
+ */
+@layer base {
+  :root {
+    color-scheme: dark;
+    /* Slate-500: readable against the slate-900 input backgrounds. */
+    --placeholder-color: var(--color-slate-500);
+  }
+
+  ::placeholder {
+    color: var(--placeholder-color);
+  }
+
+  /*
+   * Firefox and WebKit render the datetime/datalist indicator glyphs nearly
+   * black by default, which disappears against a dark input.
+   */
+  ::-webkit-calendar-picker-indicator,
+  ::-webkit-inner-spin-button {
+    filter: invert(1) opacity(0.65);
+  }
+
+  /* Text selection needs a dark-friendly pairing of its own. */
+  ::selection {
+    background-color: var(--color-indigo-500);
+    color: var(--color-white);
+  }
+}
+
+/*
  * HTMX request indicator.
  * Anything with `.htmx-indicator` is hidden until an HTMX request that targets it (or
  * whose element carries it) is in flight, at which point HTMX adds `.htmx-request`.

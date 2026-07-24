@@ -1,31 +1,31 @@
-<nav class="border-b border-slate-200 bg-white">
+<nav class="border-b border-slate-800 bg-slate-900">
   <div class="mx-auto flex w-full max-w-4xl items-center justify-between px-4 py-3">
-    <a href="/" class="flex items-center gap-2 text-lg font-semibold text-slate-900">
+    <a href="/" class="flex items-center gap-2 text-lg font-semibold text-slate-100">
       <span aria-hidden="true">📻</span>
       <span>Amateur Radio Tools</span>
     </a>
     <div class="flex items-center gap-3 text-sm">
-      <a href="/" class="text-slate-600 hover:text-slate-900">Home</a>
+      <a href="/" class="text-slate-400 hover:text-slate-100">Home</a>
       {% if let Some(user) = current_user %}
-      <a href="/dashboard" class="text-slate-600 hover:text-slate-900">Dashboard</a>
-      <a href="/logbook" class="text-slate-600 hover:text-slate-900">Logbook</a>
-      <a href="/settings/tokens" class="hidden text-slate-600 hover:text-slate-900 sm:inline"
+      <a href="/dashboard" class="text-slate-400 hover:text-slate-100">Dashboard</a>
+      <a href="/logbook" class="text-slate-400 hover:text-slate-100">Logbook</a>
+      <a href="/settings/tokens" class="hidden text-slate-400 hover:text-slate-100 sm:inline"
         >API&nbsp;tokens</a
       >
       {% if user.is_admin() %}
-      <a href="/admin" class="text-slate-600 hover:text-slate-900">Admin</a>
+      <a href="/admin" class="text-slate-400 hover:text-slate-100">Admin</a>
       {% endif %}
-      <span class="hidden text-slate-300 sm:inline">|</span>
-      <span class="hidden font-medium text-slate-700 sm:inline">{{ user.display_name() }}</span>
+      <span class="hidden text-slate-700 sm:inline">|</span>
+      <span class="hidden font-medium text-slate-300 sm:inline">{{ user.display_name() }}</span>
       <a
         href="/logout"
-        class="rounded-md bg-slate-100 px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-200"
+        class="rounded-md bg-slate-800 px-3 py-1.5 font-medium text-slate-200 hover:bg-slate-700"
         >Log out</a
       >
       {% else %}
       <a
         href="/login"
-        class="rounded-md bg-indigo-600 px-3 py-1.5 font-medium text-white hover:bg-indigo-500"
+        class="rounded-md bg-indigo-500 px-3 py-1.5 font-medium text-white hover:bg-indigo-400"
         >Log in</a
       >
       {% endif %}
