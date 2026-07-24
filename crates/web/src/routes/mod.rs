@@ -3,12 +3,26 @@
 pub mod logbook;
 pub mod pages;
 pub mod partials;
+pub mod sessions;
 pub mod settings;
+pub mod stations;
 
 use actix_web::web::ServiceConfig;
 use actix_web::{HttpResponse, get, web};
 
 use crate::error::AppError;
+
+/// Render an optional value for display, turning nothing into an em dash.
+///
+/// Every table on the site pre-formats its rows into a view struct rather than
+/// putting logic in the template, and they all need this — so it lives here
+/// rather than being copied into each route module.
+pub fn dash(value: Option<String>) -> String {
+    match value {
+        Some(v) if !v.trim().is_empty() => v,
+        _ => "—".to_string(),
+    }
+}
 
 /// Liveness probe.
 #[get("/health")]
@@ -32,6 +46,14 @@ pub fn configure(cfg: &mut ServiceConfig) {
         .service(logbook::logbook_page)
         .service(logbook::add_contact)
         .service(logbook::delete_contact)
+        // Monitoring. `/stations/rows` must be registered before
+        // `/stations/{callsign}` or the path parameter would swallow it.
+        .service(stations::stations_rows)
+        .service(stations::stations_page)
+        .service(stations::station_detail)
+        .service(stations::promote)
+        .service(sessions::sessions_page)
+        .service(sessions::session_detail)
         .service(settings::tokens_page)
         .service(settings::create_token)
         .service(settings::revoke_token)

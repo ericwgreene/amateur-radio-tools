@@ -6,6 +6,7 @@ mod auth;
 mod config;
 mod error;
 mod routes;
+mod services;
 mod state;
 mod tools;
 

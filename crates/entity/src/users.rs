@@ -22,6 +22,12 @@ pub struct Model {
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
     pub last_login_at: Option<DateTimeUtc>,
+    /// The operator's own callsign. A per-session value overrides this; this is the
+    /// default, and the anchor a future ADIF export needs for `STATION_CALLSIGN`.
+    /// Appended here to match the column order the ALTER produces.
+    pub callsign: Option<String>,
+    /// The operator's own Maidenhead grid, on the same default-and-override footing.
+    pub grid: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

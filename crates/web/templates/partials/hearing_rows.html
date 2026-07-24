@@ -1,0 +1,42 @@
+{% if hearings.is_empty() %}
+<tr>
+  <td colspan="8" class="px-4 py-10 text-center text-slate-500">
+    No individual transmissions recorded for this station.
+  </td>
+</tr>
+{% else %} {% for h in hearings %}
+<tr class="hover:bg-slate-800/50">
+  <td class="px-3 py-2 whitespace-nowrap text-slate-400">{{ h.heard_at }}</td>
+  <td class="px-3 py-2">
+    <a
+      href="/sessions/{{ h.session_id }}"
+      class="text-indigo-400 hover:text-indigo-300"
+      >{{ h.session_label }}</a
+    >
+  </td>
+  <td class="px-3 py-2 text-slate-300">{{ h.band }}</td>
+  <td class="px-3 py-2 text-slate-300">{{ h.mode }}</td>
+  <td class="px-3 py-2 font-mono text-slate-300">{{ h.frequency }}</td>
+  <td class="px-3 py-2 font-mono text-slate-400">{{ h.duration }}</td>
+  <td class="px-3 py-2 max-w-md truncate text-slate-400" title="{{ h.transcript }}">
+    {{ h.transcript }}
+  </td>
+  <td class="px-3 py-2 text-right whitespace-nowrap">
+    {% if h.promoted %}
+    <a href="/logbook" class="text-xs text-emerald-400 hover:text-emerald-300"
+      >✓ in logbook</a
+    >
+    {% else %}
+    <button
+      type="button"
+      class="rounded px-2 py-1 text-xs text-indigo-400 hover:bg-indigo-500/15 hover:text-indigo-300"
+      hx-post="/observations/{{ h.id }}/promote"
+      hx-target="#hearings-body"
+      hx-swap="innerHTML"
+    >
+      Log as QSO
+    </button>
+    {% endif %}
+  </td>
+</tr>
+{% endfor %} {% endif %}

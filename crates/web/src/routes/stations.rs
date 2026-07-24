@@ -1,0 +1,384 @@
+//! The station roster: every unique callsign this operator has ever heard.
+//!
+//! This is the long-lived view — a logbook tells you who you *worked*, this
+//! tells you who is actually out there and how often you hear them. One row per
+//! callsign, no matter how many times it has come up.
+
+use actix_web::{get, post, web};
+use askama::Template;
+use askama_web::WebTemplate;
+use chrono::Utc;
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
+    QuerySelect, Set,
+};
+use serde::Deserialize;
+
+use crate::auth::session::{AuthedUser, SessionUser};
+use crate::error::AppError;
+use crate::routes::dash;
+use crate::services::stations as station_service;
+use crate::state::AppState;
+use crate::tools::callsign;
+use entity::{contacts, observations, sessions, stations};
+
+/// Most rows one page shows. The roster grows slowly (one row per *distinct*
+/// station), so this is generous rather than a real constraint.
+const ROSTER_LIMIT: u64 = 500;
+
+/// A roster row, pre-formatted for the template.
+pub struct StationView {
+    pub callsign: String,
+    pub name: String,
+    pub qth: String,
+    pub country: String,
+    pub first_heard: String,
+    pub last_heard: String,
+    pub times_heard: i64,
+    pub times_worked: i64,
+    /// Whether this is the operator's own callsign, so it can be marked rather
+    /// than looking like just another station.
+    pub is_me: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RosterQuery {
+    pub q: Option<String>,
+    /// `last_heard` (default), `times_heard`, `first_heard`, or `callsign`.
+    pub order: Option<String>,
+}
+
+async fn load_roster(
+    state: &AppState,
+    user_id: i64,
+    own_callsign: Option<&str>,
+    query: &RosterQuery,
+) -> Result<Vec<StationView>, AppError> {
+    let mut find = stations::Entity::find().filter(stations::Column::UserId.eq(user_id));
+    if let Some(q) = &query.q {
+        let q = q.trim();
+        if !q.is_empty() {
+            find = find.filter(stations::Column::Callsign.starts_with(callsign::normalize(q)));
+        }
+    }
+    let find = match query.order.as_deref() {
+        Some("times_heard") => find.order_by_desc(stations::Column::TimesHeard),
+        Some("first_heard") => find.order_by_desc(stations::Column::FirstHeardAt),
+        Some("callsign") => find.order_by_asc(stations::Column::Callsign),
+        _ => find.order_by_desc(stations::Column::LastHeardAt),
+    };
+    let rows = find.limit(ROSTER_LIMIT).all(&state.db).await?;
+
+    // "Times worked" is counted from the logbook rather than stored, so it can't
+    // drift away from the contacts that back it.
+    let calls: Vec<String> = rows.iter().map(|s| s.callsign.clone()).collect();
+    let worked = station_service::worked_counts(&state.db, user_id, &calls).await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|s| StationView {
+            is_me: own_callsign.is_some_and(|c| c.eq_ignore_ascii_case(&s.callsign)),
+            times_worked: worked.get(&s.callsign).copied().unwrap_or(0),
+            first_heard: s.first_heard_at.format("%Y-%m-%d").to_string(),
+            last_heard: s.last_heard_at.format("%Y-%m-%d %H:%M").to_string(),
+            times_heard: s.times_heard,
+            name: dash(s.name),
+            qth: dash(s.qth),
+            country: dash(s.country),
+            callsign: s.callsign,
+        })
+        .collect())
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "stations.html")]
+struct StationsPage {
+    current_user: Option<SessionUser>,
+    stations: Vec<StationView>,
+    query: String,
+}
+
+/// Fragment: just the table body, swapped in by the search box.
+#[derive(Template, WebTemplate)]
+#[template(path = "partials/station_rows.html")]
+struct StationRows {
+    stations: Vec<StationView>,
+}
+
+#[get("/stations")]
+pub async fn stations_page(
+    user: AuthedUser,
+    state: web::Data<AppState>,
+    query: web::Query<RosterQuery>,
+) -> Result<StationsPage, AppError> {
+    let own = own_callsign(&state, user.0.id).await?;
+    let stations = load_roster(&state, user.0.id, own.as_deref(), &query).await?;
+    Ok(StationsPage {
+        query: query.q.clone().unwrap_or_default(),
+        current_user: Some(user.0),
+        stations,
+    })
+}
+
+/// HTMX: the roster body alone, for live search and re-sorting.
+#[get("/stations/rows")]
+pub async fn stations_rows(
+    user: AuthedUser,
+    state: web::Data<AppState>,
+    query: web::Query<RosterQuery>,
+) -> Result<StationRows, AppError> {
+    let own = own_callsign(&state, user.0.id).await?;
+    let stations = load_roster(&state, user.0.id, own.as_deref(), &query).await?;
+    Ok(StationRows { stations })
+}
+
+/// One hearing, for the per-station history.
+pub struct HearingView {
+    pub id: i64,
+    pub heard_at: String,
+    pub band: String,
+    pub mode: String,
+    pub frequency: String,
+    pub duration: String,
+    pub transcript: String,
+    pub session_label: String,
+    pub session_id: i64,
+    pub promoted: bool,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "station_detail.html")]
+struct StationDetailPage {
+    current_user: Option<SessionUser>,
+    callsign: String,
+    name: String,
+    qth: String,
+    grid: String,
+    country: String,
+    first_heard: String,
+    last_heard: String,
+    times_heard: i64,
+    times_worked: i64,
+    hearings: Vec<HearingView>,
+}
+
+#[get("/stations/{callsign}")]
+pub async fn station_detail(
+    user: AuthedUser,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> Result<StationDetailPage, AppError> {
+    let call = callsign::normalize(&path.into_inner());
+    let station = stations::Entity::find()
+        .filter(stations::Column::UserId.eq(user.0.id))
+        .filter(stations::Column::Callsign.eq(&call))
+        .one(&state.db)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    let hearings = load_hearings(&state, user.0.id, &call).await?;
+    let worked =
+        station_service::worked_counts(&state.db, user.0.id, std::slice::from_ref(&call)).await?;
+
+    Ok(StationDetailPage {
+        current_user: Some(user.0),
+        times_worked: worked.get(&call).copied().unwrap_or(0),
+        first_heard: station.first_heard_at.format("%Y-%m-%d %H:%M").to_string(),
+        last_heard: station.last_heard_at.format("%Y-%m-%d %H:%M").to_string(),
+        times_heard: station.times_heard,
+        name: dash(station.name),
+        qth: dash(station.qth),
+        grid: dash(station.grid),
+        country: dash(station.country),
+        callsign: call,
+        hearings,
+    })
+}
+
+async fn load_hearings(
+    state: &AppState,
+    user_id: i64,
+    call: &str,
+) -> Result<Vec<HearingView>, AppError> {
+    let rows = observations::Entity::find()
+        .filter(observations::Column::UserId.eq(user_id))
+        .filter(observations::Column::Callsign.eq(call))
+        .order_by_desc(observations::Column::HeardAt)
+        .limit(ROSTER_LIMIT)
+        .all(&state.db)
+        .await?;
+
+    // Label each hearing with the session it belongs to, fetched in one query
+    // rather than one per row.
+    let session_ids: Vec<i64> = rows.iter().map(|o| o.session_id).collect();
+    let sessions: std::collections::HashMap<i64, sessions::Model> = if session_ids.is_empty() {
+        Default::default()
+    } else {
+        sessions::Entity::find()
+            .filter(sessions::Column::UserId.eq(user_id))
+            .filter(sessions::Column::Id.is_in(session_ids))
+            .all(&state.db)
+            .await?
+            .into_iter()
+            .map(|s| (s.id, s))
+            .collect()
+    };
+
+    Ok(rows.into_iter().map(|o| to_hearing(o, &sessions)).collect())
+}
+
+fn to_hearing(
+    o: observations::Model,
+    sessions: &std::collections::HashMap<i64, sessions::Model>,
+) -> HearingView {
+    let session_label = sessions
+        .get(&o.session_id)
+        .map(session_title)
+        .unwrap_or_else(|| "—".to_string());
+    HearingView {
+        id: o.id,
+        heard_at: o.heard_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+        band: dash(o.band),
+        mode: dash(o.mode),
+        frequency: o
+            .frequency_mhz
+            .map(|f| format!("{f:.3}"))
+            .unwrap_or_else(|| "—".to_string()),
+        duration: o
+            .duration_secs
+            .map(|d| format!("{d:.1}s"))
+            .unwrap_or_else(|| "—".to_string()),
+        // Usually absent: uploading speech is opt-in, so most rows have nothing
+        // here and the column stays quiet.
+        transcript: dash(o.transcript),
+        session_label,
+        session_id: o.session_id,
+        promoted: o.promoted_contact_id.is_some(),
+    }
+}
+
+/// A human label for a session: its own if it has one, else kind + date.
+pub fn session_title(s: &sessions::Model) -> String {
+    match &s.label {
+        Some(l) if !l.trim().is_empty() => l.clone(),
+        _ => format!("{} {}", s.kind, s.started_at.format("%Y-%m-%d")),
+    }
+}
+
+/// `POST /observations/{id}/promote` — log a heard station as a worked contact.
+///
+/// The bridge between the two halves of the site: hearing a station and working
+/// it are different events, so they live in different tables, and this is what
+/// turns one into the other once the QSO actually happens.
+#[post("/observations/{id}/promote")]
+pub async fn promote(
+    user: AuthedUser,
+    state: web::Data<AppState>,
+    path: web::Path<i64>,
+) -> Result<StationHearings, AppError> {
+    let observation = observations::Entity::find_by_id(path.into_inner())
+        .filter(observations::Column::UserId.eq(user.0.id))
+        .one(&state.db)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let call = observation.callsign.clone();
+
+    // Already promoted: fall through to a re-render rather than erroring, so a
+    // double-click is harmless.
+    if observation.promoted_contact_id.is_none() {
+        let station = stations::Entity::find()
+            .filter(stations::Column::UserId.eq(user.0.id))
+            .filter(stations::Column::Callsign.eq(&call))
+            .one(&state.db)
+            .await?;
+
+        let now = Utc::now();
+        let contact = contacts::ActiveModel {
+            user_id: Set(user.0.id),
+            callsign: Set(call.clone()),
+            worked_at: Set(observation.heard_at),
+            band: Set(observation.band.clone()),
+            mode: Set(observation.mode.clone()),
+            frequency_mhz: Set(observation.frequency_mhz),
+            rst_sent: Set(None),
+            rst_received: Set(None),
+            grid: Set(station.as_ref().and_then(|s| s.grid.clone())),
+            name: Set(station.as_ref().and_then(|s| s.name.clone())),
+            qth: Set(station.as_ref().and_then(|s| s.qth.clone())),
+            country: Set(observation.country.clone()),
+            notes: Set(Some("Promoted from a monitored transmission.".to_string())),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(&state.db)
+        .await?;
+
+        let mut active = observation.into_active_model();
+        active.promoted_contact_id = Set(Some(contact.id));
+        active.update(&state.db).await?;
+    }
+
+    let hearings = load_hearings(&state, user.0.id, &call).await?;
+    Ok(StationHearings { hearings })
+}
+
+/// Fragment: the per-station hearing rows, returned after a promote.
+#[derive(Template, WebTemplate)]
+#[template(path = "partials/hearing_rows.html")]
+pub struct StationHearings {
+    hearings: Vec<HearingView>,
+}
+
+/// The signed-in operator's own callsign, if they've set one.
+async fn own_callsign(state: &AppState, user_id: i64) -> Result<Option<String>, AppError> {
+    Ok(entity::users::Entity::find_by_id(user_id)
+        .one(&state.db)
+        .await?
+        .and_then(|u| u.callsign))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn session(label: Option<&str>) -> sessions::Model {
+        sessions::Model {
+            id: 1,
+            user_id: 1,
+            client_key: "k".into(),
+            kind: "net".into(),
+            label: label.map(str::to_string),
+            started_at: Utc.with_ymd_and_hms(2026, 7, 24, 23, 0, 0).unwrap(),
+            ended_at: None,
+            band: None,
+            mode: None,
+            frequency_mhz: None,
+            operator_callsign: None,
+            grid: None,
+            source: None,
+            notes: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn session_title_prefers_the_label() {
+        assert_eq!(
+            session_title(&session(Some("Tuesday ARES"))),
+            "Tuesday ARES"
+        );
+    }
+
+    #[test]
+    fn session_title_falls_back_to_kind_and_date() {
+        assert_eq!(session_title(&session(None)), "net 2026-07-24");
+        assert_eq!(
+            session_title(&session(Some("   "))),
+            "net 2026-07-24",
+            "a blank label is not a label"
+        );
+    }
+}

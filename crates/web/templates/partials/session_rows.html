@@ -1,0 +1,36 @@
+{% if sessions.is_empty() %}
+<tr>
+  <td colspan="9" class="px-4 py-10 text-center text-slate-500">
+    No sessions yet — radio-monitor opens one each time it starts.
+  </td>
+</tr>
+{% else %} {% for s in sessions %}
+<tr class="hover:bg-slate-800/50">
+  <td class="px-3 py-2 font-medium">
+    <a href="/sessions/{{ s.id }}" class="text-indigo-400 hover:text-indigo-300"
+      >{{ s.title }}</a
+    >
+  </td>
+  <td class="px-3 py-2">
+    <span
+      class="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-xs text-slate-300"
+      >{{ s.kind }}</span
+    >
+  </td>
+  <td class="px-3 py-2 whitespace-nowrap text-slate-400">{{ s.started }}</td>
+  <td class="px-3 py-2 whitespace-nowrap">
+    {% if s.duration == "in progress" %}
+    <span class="text-amber-400">{{ s.duration }}</span>
+    {% else %}
+    <span class="text-slate-400">{{ s.duration }}</span>
+    {% endif %}
+  </td>
+  <td class="px-3 py-2 text-slate-300">{{ s.band }}</td>
+  <td class="px-3 py-2 text-slate-300">{{ s.mode }}</td>
+  <td class="px-3 py-2 font-mono text-slate-300">{{ s.frequency }}</td>
+  <td class="px-3 py-2 text-right font-mono text-slate-300">
+    {{ s.unique_stations }}
+  </td>
+  <td class="px-3 py-2 text-right font-mono text-slate-400">{{ s.heard }}</td>
+</tr>
+{% endfor %} {% endif %}

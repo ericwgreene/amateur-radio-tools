@@ -1,0 +1,32 @@
+{% extends "layout.html" %} {% block title %}Sessions — Amateur Radio Tools{%
+endblock %} {% block content %}
+<h1 class="text-2xl font-bold tracking-tight text-white">Sessions</h1>
+<p class="mt-1 text-slate-400">
+  Each monitoring run, net, or contest period, with what it turned up. A session
+  showing <em>in progress</em> hasn't been closed — either it's running now, or
+  the monitor stopped without saying goodbye.
+</p>
+
+<section
+  class="mt-6 overflow-x-auto rounded-xl border border-slate-800 bg-slate-900 shadow-sm"
+>
+  <table class="min-w-full divide-y divide-slate-800 text-sm">
+    <thead class="bg-slate-950/50 text-left text-slate-400">
+      <tr>
+        <th class="px-3 py-3 font-medium">Session</th>
+        <th class="px-3 py-3 font-medium">Kind</th>
+        <th class="px-3 py-3 font-medium">Started (UTC)</th>
+        <th class="px-3 py-3 font-medium">Ran for</th>
+        <th class="px-3 py-3 font-medium">Band</th>
+        <th class="px-3 py-3 font-medium">Mode</th>
+        <th class="px-3 py-3 font-medium">Freq</th>
+        <th class="px-3 py-3 text-right font-medium">Stations</th>
+        <th class="px-3 py-3 text-right font-medium">Heard</th>
+      </tr>
+    </thead>
+    <tbody id="sessions-body" class="divide-y divide-slate-800">
+      {% include "partials/session_rows.html" %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

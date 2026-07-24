@@ -12,6 +12,7 @@ use serde::Deserialize;
 
 use crate::auth::session::{AuthedUser, SessionUser};
 use crate::error::AppError;
+use crate::routes::dash;
 use crate::state::AppState;
 use crate::tools::callsign;
 use entity::contacts;
@@ -28,13 +29,6 @@ struct ContactView {
     rst: String,
     grid: String,
     name: String,
-}
-
-fn dash(value: Option<String>) -> String {
-    match value {
-        Some(v) if !v.trim().is_empty() => v,
-        _ => "—".to_string(),
-    }
 }
 
 fn to_view(m: contacts::Model) -> ContactView {

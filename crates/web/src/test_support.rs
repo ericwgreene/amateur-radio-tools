@@ -17,7 +17,7 @@ use crate::auth::api_token::generate_token;
 use crate::auth::session::{SESSION_USER_KEY, SessionUser};
 use crate::config::Config;
 use crate::state::AppState;
-use entity::{api_tokens, contacts, users};
+use entity::{api_tokens, contacts, observations, sessions, stations, users};
 
 /// Fixed 64-byte session key so cookies round-trip within a test app.
 pub(crate) const TEST_KEY: [u8; 64] = [7u8; 64];
@@ -127,6 +127,97 @@ pub(crate) async fn seed_contact(
     .insert(db)
     .await
     .expect("seed contact")
+}
+
+/// Insert a monitoring session and return it.
+pub(crate) async fn seed_session(
+    db: &DatabaseConnection,
+    user_id: i64,
+    client_key: &str,
+) -> sessions::Model {
+    let now = Utc::now();
+    sessions::ActiveModel {
+        user_id: Set(user_id),
+        client_key: Set(client_key.to_string()),
+        kind: Set("monitor".to_string()),
+        label: Set(None),
+        started_at: Set(now),
+        ended_at: Set(None),
+        band: Set(None),
+        mode: Set(None),
+        frequency_mhz: Set(None),
+        operator_callsign: Set(None),
+        grid: Set(None),
+        source: Set(Some("test".to_string())),
+        notes: Set(None),
+        created_at: Set(now),
+        updated_at: Set(now),
+        ..Default::default()
+    }
+    .insert(db)
+    .await
+    .expect("seed session")
+}
+
+/// Insert a heard-transmission record and return it.
+pub(crate) async fn seed_observation(
+    db: &DatabaseConnection,
+    user_id: i64,
+    session_id: i64,
+    callsign: &str,
+) -> observations::Model {
+    let now = Utc::now();
+    observations::ActiveModel {
+        user_id: Set(user_id),
+        session_id: Set(session_id),
+        // Unique per row so repeated calls in one test don't trip the idempotency index.
+        client_key: Set(format!(
+            "{callsign}-{}",
+            now.timestamp_nanos_opt().unwrap_or(0)
+        )),
+        callsign: Set(callsign.to_string()),
+        heard_at: Set(now),
+        duration_secs: Set(Some(3.0)),
+        band: Set(None),
+        mode: Set(None),
+        frequency_mhz: Set(None),
+        country: Set(None),
+        transcript: Set(None),
+        source: Set(Some("test".to_string())),
+        promoted_contact_id: Set(None),
+        created_at: Set(now),
+        ..Default::default()
+    }
+    .insert(db)
+    .await
+    .expect("seed observation")
+}
+
+/// Insert a unique-station roster row and return it.
+pub(crate) async fn seed_station(
+    db: &DatabaseConnection,
+    user_id: i64,
+    callsign: &str,
+) -> stations::Model {
+    let now = Utc::now();
+    stations::ActiveModel {
+        user_id: Set(user_id),
+        callsign: Set(callsign.to_string()),
+        first_heard_at: Set(now),
+        last_heard_at: Set(now),
+        times_heard: Set(1),
+        name: Set(None),
+        qth: Set(None),
+        grid: Set(None),
+        country: Set(None),
+        notes: Set(None),
+        created_at: Set(now),
+        updated_at: Set(now),
+        ..Default::default()
+    }
+    .insert(db)
+    .await
+    .expect("seed station")
 }
 
 /// A `SessionUser` for direct (non-HTTP) handler/extractor tests.
