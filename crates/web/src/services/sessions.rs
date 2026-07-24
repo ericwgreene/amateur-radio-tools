@@ -27,6 +27,11 @@ pub fn is_valid_kind(kind: &str) -> bool {
 /// out a label the operator set in the browser.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SessionInput {
+    /// Defaults to empty rather than being a required field, because the
+    /// `PATCH .../by-key/{client_key}` route already carries it in the path and it would
+    /// be gratuitous to make callers repeat it in the body. Routes that *do* need it
+    /// (the batch ingest and `POST /sessions`) validate it explicitly.
+    #[serde(default)]
     pub client_key: String,
     pub kind: Option<String>,
     pub label: Option<String>,

@@ -386,15 +386,14 @@ async fn api_sessions_patch_closes_and_filters_open() {
     let close = test::TestRequest::patch()
         .uri("/api/v1/sessions/by-key/never-opened")
         .insert_header(("Authorization", bearer.clone()))
-        .set_json(serde_json::json!({"client_key": "ignored", "ended_at": "2026-07-24T23:00:00Z"}))
+        // No `client_key` in the body: the path already carries it, and a real client
+        // sending only the fields it wants to change must work.
+        .set_json(serde_json::json!({"ended_at": "2026-07-24T23:00:00Z"}))
         .to_request();
     let resp = test::call_service(&app, close).await;
     assert_eq!(resp.status(), 200);
     let session: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
-    assert_eq!(
-        session["client_key"], "never-opened",
-        "the path wins over the body"
-    );
+    assert_eq!(session["client_key"], "never-opened");
     assert!(!session["ended_at"].is_null());
 
     // A closed session is excluded from the open filter.
@@ -449,9 +448,15 @@ async fn api_session_detail_resolves_the_operator_identity() {
     let patch = test::TestRequest::patch()
         .uri("/api/v1/sessions/by-key/run-1")
         .insert_header(("Authorization", bearer.clone()))
-        .set_json(serde_json::json!({"client_key": "run-1", "operator_callsign": "W4CLUB"}))
+        // A body key that disagrees with the path must not retarget the write.
+        .set_json(
+            serde_json::json!({"client_key": "some-other-run", "operator_callsign": "W4CLUB"}),
+        )
         .to_request();
-    assert_eq!(test::call_service(&app, patch).await.status(), 200);
+    let resp = test::call_service(&app, patch).await;
+    assert_eq!(resp.status(), 200);
+    let patched: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(patched["id"], session.id, "the path key wins over the body");
 
     let req = test::TestRequest::get()
         .uri(&format!("/api/v1/sessions/{}", session.id))
