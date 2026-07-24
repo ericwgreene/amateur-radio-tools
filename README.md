@@ -44,6 +44,13 @@ disabled), so you can start immediately and wire up Auth0 when you're ready.
 | `GET /api/v1/contacts` | List the caller's contacts. |
 | `GET /api/v1/contacts/{id}` | Fetch one of the caller's contacts. |
 | `GET /api/v1/me` | Identify the token's owner (handy for verifying a token). |
+| `POST /api/v1/sessions` | Open a monitoring/contest session (idempotent). |
+| `PATCH /api/v1/sessions/by-key/{client_key}` | Relabel or close a session. |
+| `GET /api/v1/sessions` · `GET /api/v1/sessions/{id}` | List / fetch sessions. |
+| `POST /api/v1/observations` | **Batch**-log heard transmissions. |
+| `GET /api/v1/observations` | The monitoring log, filterable and paged. |
+| `POST /api/v1/observations/{id}/promote` | Turn a heard station into a logbook contact. |
+| `GET /api/v1/stations` · `GET /api/v1/stations/{callsign}` | The unique-station roster. |
 
 See [REST API](#rest-api) below.
 
@@ -233,6 +240,63 @@ curl "http://localhost:8080/api/v1/me?api_key=<token>"
 
 Tokens are stored only as a SHA-256 hash; missing/invalid tokens get a `401` with a JSON
 body (`{"error":"unauthorized", ...}`), and malformed request bodies get a `400`.
+
+### Monitoring: sessions, observations, stations
+
+The contacts endpoints log **QSOs** — stations you worked. A receive-only monitor produces
+something different: a stream of stations *heard*. Those are kept in their own tables so the
+logbook stays a logbook (and a future ADIF export stays meaningful) while a busy net's
+hundreds of hearings go somewhere they can't drown it.
+
+Three resources:
+
+- **`sessions`** — one operating run: a casual monitor, a net, a contest, a POTA activation.
+  Carries the band/mode/frequency a receive-only setup can't discover for itself.
+- **`observations`** — one heard transmission, belonging to a session.
+- **`stations`** — the rollup: one row per callsign you have *ever* heard, with first/last
+  heard and a hearing count. This is the "unique contacts over time" log.
+
+```bash
+# Upload a batch of hearings. The session travels with the batch and is created or
+# updated as a side effect, so a client never has to learn a server-assigned id.
+curl -X POST http://localhost:8080/api/v1/observations \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{
+        "session": {"client_key":"run-2026-07-24","kind":"net","label":"Tuesday ARES net",
+                    "band":"2m","mode":"FM","frequency_mhz":146.88},
+        "observations": [
+          {"client_key":"clip-1:KR4NRC","callsign":"KR4NRC","heard_at":"2026-07-24T23:12:41Z",
+           "duration_secs":4.8,"name":"John Smith","qth":"Lynchburg, VA"}
+        ]
+      }'
+
+# The roster of every station ever heard
+curl -H "Authorization: Bearer <token>" "http://localhost:8080/api/v1/stations?order=times_heard"
+
+# Close the session when the run ends
+curl -X PATCH http://localhost:8080/api/v1/sessions/by-key/run-2026-07-24 \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"ended_at":"2026-07-25T01:30:00Z"}'
+```
+
+Three behaviours are worth knowing, because they are what let an offline client retry
+safely:
+
+- **Ingest is idempotent.** Every item carries a `client_key`; replaying a batch after a
+  network failure reports the rows as `duplicates` and inserts nothing.
+- **A bad row never fails the batch.** The response is always `200` with
+  `{accepted, duplicates, rejected, stations_touched}`. If one unparseable callsign returned
+  `400` for the whole request, a retrying client would wedge forever.
+- **`PATCH .../by-key/{key}` creates an unknown key** rather than 404ing, so a queued
+  "session ended" that arrives before its "session opened" still lands correctly.
+
+Batches are capped at **200 observations**. These endpoints are paged — `?limit=&offset=`,
+default 100, max 500 — and return `{items, total, limit, offset}`, unlike the older
+contacts endpoints which return a bare array.
+
+> **Note:** there is currently no per-token rate limiting, and tokens have no scopes or
+> expiry. Batch ingest makes a misbehaving client more costly than before; the 200-item cap
+> and the 2 MB request-body limit are the only ceilings today.
 
 ### Testing the API without Auth0
 

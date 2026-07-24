@@ -9,6 +9,10 @@ pub use sea_orm_migration::prelude::*;
 mod m20250722_000001_create_users;
 mod m20250722_000002_create_contacts;
 mod m20250722_000003_create_api_tokens;
+mod m20260724_000001_create_sessions;
+mod m20260724_000002_create_observations;
+mod m20260724_000003_create_stations;
+mod m20260724_000004_add_user_station_fields;
 
 pub struct Migrator;
 
@@ -19,6 +23,10 @@ impl MigratorTrait for Migrator {
             Box::new(m20250722_000001_create_users::Migration),
             Box::new(m20250722_000002_create_contacts::Migration),
             Box::new(m20250722_000003_create_api_tokens::Migration),
+            Box::new(m20260724_000001_create_sessions::Migration),
+            Box::new(m20260724_000002_create_observations::Migration),
+            Box::new(m20260724_000003_create_stations::Migration),
+            Box::new(m20260724_000004_add_user_station_fields::Migration),
         ]
     }
 }

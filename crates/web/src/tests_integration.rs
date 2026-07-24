@@ -13,7 +13,8 @@ use crate::auth::session::SessionUser;
 use crate::config::Config;
 use crate::error::AppError;
 use crate::test_support::{
-    login, seed_contact, seed_token, seed_user, session_user, test_app, test_state,
+    login, seed_contact, seed_observation, seed_session, seed_station, seed_token, seed_user,
+    session_user, test_app, test_state,
 };
 
 /// Build a urlencoded form POST request builder (call `.to_request()` at the use site).
@@ -309,6 +310,435 @@ async fn api_contacts_crud_with_token() {
         .insert_header(("Authorization", bearer))
         .to_request();
     assert_eq!(test::call_service(&app, missing).await.status(), 404);
+}
+
+// ---------------------------------------------------------------------------
+// REST API — monitoring (sessions, observations, stations)
+// ---------------------------------------------------------------------------
+
+/// Body for a minimal observation batch.
+fn batch(session_key: &str, observations: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "session": { "client_key": session_key, "kind": "monitor", "band": "2m" },
+        "observations": observations,
+    })
+}
+
+#[actix_web::test]
+async fn api_sessions_create_is_idempotent_on_client_key() {
+    let state = test_state().await;
+    let user = seed_user(&state.db, "op@example.com").await;
+    let (raw, _) = seed_token(&state.db, user.id).await;
+    let app = test_app!(state);
+    let bearer = format!("Bearer {raw}");
+
+    let body = serde_json::json!({"client_key": "run-1", "kind": "contest", "label": "Field Day"});
+
+    let first = test::TestRequest::post()
+        .uri("/api/v1/sessions")
+        .insert_header(("Authorization", bearer.clone()))
+        .set_json(&body)
+        .to_request();
+    let resp = test::call_service(&app, first).await;
+    assert_eq!(resp.status(), 201);
+    let created: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(created["kind"], "contest");
+
+    // A replay is a 200 on the same row, so a client that lost the first response can
+    // tell it already landed.
+    let again = test::TestRequest::post()
+        .uri("/api/v1/sessions")
+        .insert_header(("Authorization", bearer.clone()))
+        .set_json(&body)
+        .to_request();
+    let resp = test::call_service(&app, again).await;
+    assert_eq!(resp.status(), 200);
+    let replayed: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(replayed["id"], created["id"]);
+
+    // An unknown kind is rejected rather than silently stored.
+    let bad = test::TestRequest::post()
+        .uri("/api/v1/sessions")
+        .insert_header(("Authorization", bearer.clone()))
+        .set_json(serde_json::json!({"client_key": "run-2", "kind": "rag-chew"}))
+        .to_request();
+    assert_eq!(test::call_service(&app, bad).await.status(), 400);
+
+    // So is a blank key.
+    let blank = test::TestRequest::post()
+        .uri("/api/v1/sessions")
+        .insert_header(("Authorization", bearer))
+        .set_json(serde_json::json!({"client_key": "  "}))
+        .to_request();
+    assert_eq!(test::call_service(&app, blank).await.status(), 400);
+}
+
+#[actix_web::test]
+async fn api_sessions_patch_closes_and_filters_open() {
+    let state = test_state().await;
+    let user = seed_user(&state.db, "op@example.com").await;
+    let (raw, _) = seed_token(&state.db, user.id).await;
+    let app = test_app!(state);
+    let bearer = format!("Bearer {raw}");
+
+    // PATCH on an unknown key creates it — that upsert is what makes a client's
+    // upload queue order-independent.
+    let close = test::TestRequest::patch()
+        .uri("/api/v1/sessions/by-key/never-opened")
+        .insert_header(("Authorization", bearer.clone()))
+        .set_json(serde_json::json!({"client_key": "ignored", "ended_at": "2026-07-24T23:00:00Z"}))
+        .to_request();
+    let resp = test::call_service(&app, close).await;
+    assert_eq!(resp.status(), 200);
+    let session: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(
+        session["client_key"], "never-opened",
+        "the path wins over the body"
+    );
+    assert!(!session["ended_at"].is_null());
+
+    // A closed session is excluded from the open filter.
+    let open = test::TestRequest::get()
+        .uri("/api/v1/sessions?open=true")
+        .insert_header(("Authorization", bearer.clone()))
+        .to_request();
+    let resp = test::call_service(&app, open).await;
+    let page: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(page["total"], 0);
+
+    // But is still listed unfiltered, and by kind.
+    let all = test::TestRequest::get()
+        .uri("/api/v1/sessions?kind=monitor")
+        .insert_header(("Authorization", bearer))
+        .to_request();
+    let resp = test::call_service(&app, all).await;
+    let page: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(page["total"], 1);
+}
+
+#[actix_web::test]
+async fn api_session_detail_resolves_the_operator_identity() {
+    use sea_orm::{ActiveModelTrait, IntoActiveModel, Set};
+
+    let state = test_state().await;
+    let user = seed_user(&state.db, "op@example.com").await;
+    let (raw, _) = seed_token(&state.db, user.id).await;
+
+    // Give the operator a default station identity.
+    let mut active = user.clone().into_active_model();
+    active.callsign = Set(Some("W4USR".to_string()));
+    active.grid = Set(Some("FM07".to_string()));
+    active.update(&state.db).await.unwrap();
+
+    let session = seed_session(&state.db, user.id, "run-1").await;
+    let app = test_app!(state);
+    let bearer = format!("Bearer {raw}");
+
+    // The session sets neither, so both fall back to the profile.
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/v1/sessions/{}", session.id))
+        .insert_header(("Authorization", bearer.clone()))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+    let detail: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(detail["effective_callsign"], "W4USR");
+    assert_eq!(detail["effective_grid"], "FM07");
+
+    // A club call for this run overrides the default.
+    let patch = test::TestRequest::patch()
+        .uri("/api/v1/sessions/by-key/run-1")
+        .insert_header(("Authorization", bearer.clone()))
+        .set_json(serde_json::json!({"client_key": "run-1", "operator_callsign": "W4CLUB"}))
+        .to_request();
+    assert_eq!(test::call_service(&app, patch).await.status(), 200);
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/v1/sessions/{}", session.id))
+        .insert_header(("Authorization", bearer))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let detail: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(detail["effective_callsign"], "W4CLUB");
+    assert_eq!(detail["effective_grid"], "FM07", "grid still falls back");
+}
+
+#[actix_web::test]
+async fn api_observations_batch_ingest_and_replay() {
+    let state = test_state().await;
+    let user = seed_user(&state.db, "op@example.com").await;
+    let (raw, _) = seed_token(&state.db, user.id).await;
+    let app = test_app!(state);
+    let bearer = format!("Bearer {raw}");
+
+    let items = serde_json::json!([
+        {"client_key": "c1", "callsign": "kr4nrc", "heard_at": "2026-07-24T23:12:41Z"},
+        {"client_key": "c2", "callsign": "ve3xyz", "heard_at": "2026-07-24T23:14:02Z"},
+        {"client_key": "c3", "callsign": "!!",     "heard_at": "2026-07-24T23:15:00Z"},
+    ]);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/observations")
+        .insert_header(("Authorization", bearer.clone()))
+        .set_json(batch("run-1", items.clone()))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200, "partial success is a 200, not a 201");
+    let out: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(out["accepted"], 2);
+    assert_eq!(out["duplicates"], 0);
+    assert_eq!(out["stations_touched"], 2);
+    assert_eq!(out["rejected"][0]["client_key"], "c3");
+
+    // Replaying the identical batch must not duplicate anything — this is the property
+    // the client's retry loop depends on.
+    let again = test::TestRequest::post()
+        .uri("/api/v1/observations")
+        .insert_header(("Authorization", bearer.clone()))
+        .set_json(batch("run-1", items))
+        .to_request();
+    let resp = test::call_service(&app, again).await;
+    let out: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(out["accepted"], 0);
+    assert_eq!(out["duplicates"], 2);
+
+    // The roster now holds one row per distinct station, with the country resolved and
+    // the band inherited from the session.
+    let stations = test::TestRequest::get()
+        .uri("/api/v1/stations?order=callsign")
+        .insert_header(("Authorization", bearer.clone()))
+        .to_request();
+    let resp = test::call_service(&app, stations).await;
+    let page: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(page["total"], 2);
+    assert_eq!(page["items"][0]["callsign"], "KR4NRC");
+    assert_eq!(page["items"][0]["times_heard"], 1);
+    assert_eq!(page["items"][0]["times_worked"], 0);
+    assert_eq!(page["items"][1]["country"], "Canada");
+
+    let obs = test::TestRequest::get()
+        .uri("/api/v1/observations?callsign=KR4NRC")
+        .insert_header(("Authorization", bearer))
+        .to_request();
+    let resp = test::call_service(&app, obs).await;
+    let page: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(page["total"], 1);
+    assert_eq!(page["items"][0]["band"], "2m");
+    assert!(
+        page["items"][0]["transcript"].is_null(),
+        "opt-in default is off"
+    );
+}
+
+#[actix_web::test]
+async fn api_observations_rejects_an_oversized_batch() {
+    let state = test_state().await;
+    let user = seed_user(&state.db, "op@example.com").await;
+    let (raw, _) = seed_token(&state.db, user.id).await;
+    let app = test_app!(state);
+
+    let items: Vec<serde_json::Value> = (0..=crate::services::observations::MAX_BATCH)
+        .map(|i| {
+            serde_json::json!({
+                "client_key": format!("c{i}"),
+                "callsign": "W1AW",
+                "heard_at": "2026-07-24T23:12:41Z",
+            })
+        })
+        .collect();
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/observations")
+        .insert_header(("Authorization", format!("Bearer {raw}")))
+        .set_json(batch("run-1", serde_json::Value::Array(items)))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), 400);
+}
+
+#[actix_web::test]
+async fn api_observations_paginate() {
+    let state = test_state().await;
+    let user = seed_user(&state.db, "op@example.com").await;
+    let (raw, _) = seed_token(&state.db, user.id).await;
+    let session = seed_session(&state.db, user.id, "run-1").await;
+    for call in ["W1AW", "K4CQ", "VE3XYZ", "W4ABC", "KR4NRC"] {
+        seed_observation(&state.db, user.id, session.id, call).await;
+    }
+    let app = test_app!(state);
+    let bearer = format!("Bearer {raw}");
+
+    let req = test::TestRequest::get()
+        .uri("/api/v1/observations?limit=2&offset=2")
+        .insert_header(("Authorization", bearer.clone()))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let page: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(page["total"], 5);
+    assert_eq!(page["limit"], 2);
+    assert_eq!(page["offset"], 2);
+    assert_eq!(page["items"].as_array().unwrap().len(), 2);
+
+    // An oversized limit is clamped, not rejected.
+    let req = test::TestRequest::get()
+        .uri("/api/v1/observations?limit=99999")
+        .insert_header(("Authorization", bearer.clone()))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let page: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(page["limit"], crate::api::MAX_LIMIT);
+
+    // An offset past the end is an empty page, not an error.
+    let req = test::TestRequest::get()
+        .uri("/api/v1/observations?offset=500")
+        .insert_header(("Authorization", bearer))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let page: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert!(page["items"].as_array().unwrap().is_empty());
+    assert_eq!(page["total"], 5);
+}
+
+#[actix_web::test]
+async fn api_promote_observation_is_idempotent() {
+    let state = test_state().await;
+    let user = seed_user(&state.db, "op@example.com").await;
+    let (raw, _) = seed_token(&state.db, user.id).await;
+    let session = seed_session(&state.db, user.id, "run-1").await;
+    let observation = seed_observation(&state.db, user.id, session.id, "KR4NRC").await;
+    seed_station(&state.db, user.id, "KR4NRC").await;
+    let app = test_app!(state);
+    let bearer = format!("Bearer {raw}");
+
+    let promote = test::TestRequest::post()
+        .uri(&format!("/api/v1/observations/{}/promote", observation.id))
+        .insert_header(("Authorization", bearer.clone()))
+        .set_json(serde_json::json!({"rst_sent": "59", "rst_received": "57"}))
+        .to_request();
+    let resp = test::call_service(&app, promote).await;
+    assert_eq!(resp.status(), 201);
+    let contact: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(contact["callsign"], "KR4NRC");
+    assert_eq!(contact["rst_sent"], "59");
+
+    // Promoting again returns the same contact rather than creating a second QSO.
+    let again = test::TestRequest::post()
+        .uri(&format!("/api/v1/observations/{}/promote", observation.id))
+        .insert_header(("Authorization", bearer.clone()))
+        .set_json(serde_json::json!({}))
+        .to_request();
+    let resp = test::call_service(&app, again).await;
+    assert_eq!(resp.status(), 200);
+    let repeat: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(repeat["id"], contact["id"]);
+
+    // The station roster now derives times_worked from the logbook.
+    let station = test::TestRequest::get()
+        .uri("/api/v1/stations/kr4nrc")
+        .insert_header(("Authorization", bearer.clone()))
+        .to_request();
+    let resp = test::call_service(&app, station).await;
+    let row: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(row["times_worked"], 1);
+
+    let missing = test::TestRequest::post()
+        .uri("/api/v1/observations/999999/promote")
+        .insert_header(("Authorization", bearer))
+        .set_json(serde_json::json!({}))
+        .to_request();
+    assert_eq!(test::call_service(&app, missing).await.status(), 404);
+}
+
+#[actix_web::test]
+async fn api_monitoring_is_scoped_to_the_token_owner() {
+    let state = test_state().await;
+    let mine = seed_user(&state.db, "mine@example.com").await;
+    let theirs = seed_user(&state.db, "theirs@example.com").await;
+    let (raw, _) = seed_token(&state.db, mine.id).await;
+
+    let their_session = seed_session(&state.db, theirs.id, "their-run").await;
+    seed_observation(&state.db, theirs.id, their_session.id, "W1AW").await;
+    seed_station(&state.db, theirs.id, "W1AW").await;
+
+    let app = test_app!(state);
+    let bearer = format!("Bearer {raw}");
+
+    for uri in [
+        "/api/v1/sessions",
+        "/api/v1/observations",
+        "/api/v1/stations",
+    ] {
+        let req = test::TestRequest::get()
+            .uri(uri)
+            .insert_header(("Authorization", bearer.clone()))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        let page: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+        assert_eq!(page["total"], 0, "{uri} leaked another user's rows");
+    }
+
+    let their_row = test::TestRequest::get()
+        .uri(&format!("/api/v1/sessions/{}", their_session.id))
+        .insert_header(("Authorization", bearer.clone()))
+        .to_request();
+    assert_eq!(test::call_service(&app, their_row).await.status(), 404);
+
+    let their_station = test::TestRequest::get()
+        .uri("/api/v1/stations/W1AW")
+        .insert_header(("Authorization", bearer))
+        .to_request();
+    assert_eq!(test::call_service(&app, their_station).await.status(), 404);
+}
+
+#[actix_web::test]
+async fn api_monitoring_requires_a_token() {
+    let state = test_state().await;
+    let app = test_app!(state);
+
+    for uri in [
+        "/api/v1/sessions",
+        "/api/v1/observations",
+        "/api/v1/stations",
+    ] {
+        let req = test::TestRequest::get().uri(uri).to_request();
+        assert_eq!(test::call_service(&app, req).await.status(), 401, "{uri}");
+    }
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/observations")
+        .set_json(batch("run-1", serde_json::json!([])))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), 401);
+}
+
+#[actix_web::test]
+async fn api_stations_search_by_prefix() {
+    let state = test_state().await;
+    let user = seed_user(&state.db, "op@example.com").await;
+    let (raw, _) = seed_token(&state.db, user.id).await;
+    seed_station(&state.db, user.id, "KR4NRC").await;
+    seed_station(&state.db, user.id, "K4CQ").await;
+    seed_station(&state.db, user.id, "W1AW").await;
+    let app = test_app!(state);
+    let bearer = format!("Bearer {raw}");
+
+    // Lowercase input is normalized before matching.
+    let req = test::TestRequest::get()
+        .uri("/api/v1/stations?q=k4")
+        .insert_header(("Authorization", bearer.clone()))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let page: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(page["total"], 1);
+    assert_eq!(page["items"][0]["callsign"], "K4CQ");
+
+    // A blank query is ignored rather than matching nothing.
+    let req = test::TestRequest::get()
+        .uri("/api/v1/stations?q=%20&order=times_heard")
+        .insert_header(("Authorization", bearer))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let page: serde_json::Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    assert_eq!(page["total"], 3);
 }
 
 // ---------------------------------------------------------------------------

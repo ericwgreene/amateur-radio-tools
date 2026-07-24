@@ -6,5 +6,8 @@
 
 pub mod api_tokens;
 pub mod contacts;
+pub mod observations;
 pub mod prelude;
+pub mod sessions;
+pub mod stations;
 pub mod users;
