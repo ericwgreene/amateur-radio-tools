@@ -1,0 +1,72 @@
+{% extends "layout.html" %} {% block title %}{{ callsign }} — Amateur Radio
+Tools{% endblock %} {% block content %}
+<div class="flex flex-wrap items-baseline justify-between gap-3">
+  <h1 class="font-mono text-2xl font-bold tracking-tight text-white">
+    {{ callsign }}
+  </h1>
+  <a href="/stations" class="text-sm text-indigo-400 hover:text-indigo-300"
+    >← All stations</a
+  >
+</div>
+
+<section
+  class="mt-6 grid grid-cols-2 gap-4 rounded-xl border border-slate-800 bg-slate-900 p-6 shadow-sm sm:grid-cols-3 lg:grid-cols-6"
+>
+  <div>
+    <div class="text-xs text-slate-500">Name</div>
+    <div class="mt-1 text-slate-200">{{ name }}</div>
+  </div>
+  <div>
+    <div class="text-xs text-slate-500">QTH</div>
+    <div class="mt-1 text-slate-200">{{ qth }}</div>
+  </div>
+  <div>
+    <div class="text-xs text-slate-500">Grid</div>
+    <div class="mt-1 font-mono text-slate-200">{{ grid }}</div>
+  </div>
+  <div>
+    <div class="text-xs text-slate-500">Country</div>
+    <div class="mt-1 text-slate-200">{{ country }}</div>
+  </div>
+  <div>
+    <div class="text-xs text-slate-500">Times heard</div>
+    <div class="mt-1 font-mono text-slate-200">{{ times_heard }}</div>
+  </div>
+  <div>
+    <div class="text-xs text-slate-500">Times worked</div>
+    <div class="mt-1 font-mono text-slate-200">{{ times_worked }}</div>
+  </div>
+</section>
+
+<p class="mt-3 text-sm text-slate-500">
+  First heard {{ first_heard }} · most recently {{ last_heard }}
+</p>
+
+<h2 class="mt-8 text-lg font-semibold text-slate-100">Every time you heard them</h2>
+<p class="mt-1 text-sm text-slate-400">
+  Worked one of these? <strong class="text-slate-300">Log as QSO</strong> copies it
+  into your logbook.
+</p>
+
+<section
+  class="mt-4 overflow-x-auto rounded-xl border border-slate-800 bg-slate-900 shadow-sm"
+>
+  <table class="min-w-full divide-y divide-slate-800 text-sm">
+    <thead class="bg-slate-950/50 text-left text-slate-400">
+      <tr>
+        <th class="px-3 py-3 font-medium">Heard at (UTC)</th>
+        <th class="px-3 py-3 font-medium">Session</th>
+        <th class="px-3 py-3 font-medium">Band</th>
+        <th class="px-3 py-3 font-medium">Mode</th>
+        <th class="px-3 py-3 font-medium">Freq</th>
+        <th class="px-3 py-3 font-medium">Length</th>
+        <th class="px-3 py-3 font-medium">Transcript</th>
+        <th class="px-3 py-3"></th>
+      </tr>
+    </thead>
+    <tbody id="hearings-body" class="divide-y divide-slate-800">
+      {% include "partials/hearing_rows.html" %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

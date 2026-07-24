@@ -1,0 +1,65 @@
+{% extends "layout.html" %} {% block title %}Stations — Amateur Radio Tools{%
+endblock %} {% block content %}
+<h1 class="text-2xl font-bold tracking-tight text-white">Stations</h1>
+<p class="mt-1 text-slate-400">
+  Every callsign your monitor has heard, once each. Unlike the logbook — which
+  records stations you <em>worked</em> — this is simply who has been on the air.
+</p>
+
+<section class="mt-6 flex flex-wrap items-end gap-4">
+  <label class="block flex-1 min-w-56">
+    <span class="text-sm font-medium text-slate-300">Search callsign</span>
+    <input
+      name="q"
+      value="{{ query }}"
+      autocomplete="off"
+      placeholder="K4"
+      class="mt-1 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-slate-100 uppercase shadow-sm focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 focus:outline-none"
+      hx-get="/stations/rows"
+      hx-trigger="keyup changed delay:300ms, search"
+      hx-target="#stations-body"
+      hx-swap="innerHTML"
+      hx-include="[name='order']"
+    />
+  </label>
+  <label class="block">
+    <span class="text-sm font-medium text-slate-300">Sort by</span>
+    <select
+      name="order"
+      class="mt-1 rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 shadow-sm focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 focus:outline-none"
+      hx-get="/stations/rows"
+      hx-trigger="change"
+      hx-target="#stations-body"
+      hx-swap="innerHTML"
+      hx-include="[name='q']"
+    >
+      <option value="last_heard">Last heard</option>
+      <option value="times_heard">Times heard</option>
+      <option value="first_heard">First heard</option>
+      <option value="callsign">Callsign</option>
+    </select>
+  </label>
+</section>
+
+<section
+  class="mt-6 overflow-x-auto rounded-xl border border-slate-800 bg-slate-900 shadow-sm"
+>
+  <table class="min-w-full divide-y divide-slate-800 text-sm">
+    <thead class="bg-slate-950/50 text-left text-slate-400">
+      <tr>
+        <th class="px-3 py-3 font-medium">Callsign</th>
+        <th class="px-3 py-3 font-medium">Name</th>
+        <th class="px-3 py-3 font-medium">QTH</th>
+        <th class="px-3 py-3 font-medium">Country</th>
+        <th class="px-3 py-3 font-medium">First heard</th>
+        <th class="px-3 py-3 font-medium">Last heard</th>
+        <th class="px-3 py-3 text-right font-medium">Heard</th>
+        <th class="px-3 py-3 text-right font-medium">Worked</th>
+      </tr>
+    </thead>
+    <tbody id="stations-body" class="divide-y divide-slate-800">
+      {% include "partials/station_rows.html" %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

@@ -1,0 +1,34 @@
+{% if stations.is_empty() %}
+<tr>
+  <td colspan="8" class="px-4 py-10 text-center text-slate-500">
+    No stations heard yet — point radio-monitor at this site and they'll appear
+    here.
+  </td>
+</tr>
+{% else %} {% for s in stations %}
+<tr class="hover:bg-slate-800/50">
+  <td class="px-3 py-2 font-mono font-semibold whitespace-nowrap">
+    <a href="/stations/{{ s.callsign }}" class="text-indigo-400 hover:text-indigo-300"
+      >{{ s.callsign }}</a
+    >
+    {% if s.is_me %}
+    <span class="ml-1 rounded bg-slate-800 px-1.5 py-0.5 text-xs font-normal text-slate-400"
+      >you</span
+    >
+    {% endif %}
+  </td>
+  <td class="px-3 py-2 text-slate-300">{{ s.name }}</td>
+  <td class="px-3 py-2 text-slate-300">{{ s.qth }}</td>
+  <td class="px-3 py-2 text-slate-300">{{ s.country }}</td>
+  <td class="px-3 py-2 whitespace-nowrap text-slate-400">{{ s.first_heard }}</td>
+  <td class="px-3 py-2 whitespace-nowrap text-slate-400">{{ s.last_heard }}</td>
+  <td class="px-3 py-2 text-right font-mono text-slate-300">{{ s.times_heard }}</td>
+  <td class="px-3 py-2 text-right font-mono">
+    {% if s.times_worked > 0 %}
+    <span class="text-emerald-400">{{ s.times_worked }}</span>
+    {% else %}
+    <span class="text-slate-600">—</span>
+    {% endif %}
+  </td>
+</tr>
+{% endfor %} {% endif %}

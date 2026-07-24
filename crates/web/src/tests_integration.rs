@@ -313,6 +313,223 @@ async fn api_contacts_crud_with_token() {
 }
 
 // ---------------------------------------------------------------------------
+// Browser pages — stations & sessions
+// ---------------------------------------------------------------------------
+
+#[actix_web::test]
+async fn monitoring_pages_require_auth() {
+    let state = test_state().await;
+    let app = test_app!(state);
+
+    for uri in ["/stations", "/sessions", "/stations/rows"] {
+        let req = test::TestRequest::get().uri(uri).to_request();
+        assert_eq!(test::call_service(&app, req).await.status(), 303, "{uri}");
+    }
+}
+
+#[actix_web::test]
+async fn stations_page_renders_empty_and_populated() {
+    let state = test_state().await;
+    let user = seed_user(&state.db, "op@example.com").await;
+    let app = test_app!(state);
+    let cookie = login!(app, user.id, false);
+
+    // Empty state.
+    let req = test::TestRequest::get()
+        .uri("/stations")
+        .cookie(cookie.clone())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+    let body = test::read_body(resp).await;
+    assert!(String::from_utf8_lossy(&body).contains("No stations heard yet"));
+
+    seed_station(&state.db, user.id, "KR4NRC").await;
+    let req = test::TestRequest::get()
+        .uri("/stations")
+        .cookie(cookie)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let body = test::read_body(resp).await;
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("KR4NRC"));
+    assert!(
+        body.contains("/stations/KR4NRC"),
+        "rows link to the detail page"
+    );
+}
+
+#[actix_web::test]
+async fn stations_rows_fragment_searches_and_sorts() {
+    let state = test_state().await;
+    let user = seed_user(&state.db, "op@example.com").await;
+    seed_station(&state.db, user.id, "KR4NRC").await;
+    seed_station(&state.db, user.id, "W1AW").await;
+    let app = test_app!(state);
+    let cookie = login!(app, user.id, false);
+
+    // The HTMX fragment is rows only — no page chrome.
+    let req = test::TestRequest::get()
+        .uri("/stations/rows?q=kr&order=times_heard")
+        .cookie(cookie.clone())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+    let body = test::read_body(resp).await;
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("KR4NRC"));
+    assert!(!body.contains("W1AW"), "filtered out by the search");
+    assert!(!body.contains("<html"), "a fragment, not a page");
+
+    // `/stations/rows` must not be captured by the `{callsign}` route.
+    let req = test::TestRequest::get()
+        .uri("/stations/rows")
+        .cookie(cookie)
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), 200);
+}
+
+#[actix_web::test]
+async fn station_detail_lists_every_hearing() {
+    let state = test_state().await;
+    let user = seed_user(&state.db, "op@example.com").await;
+    let session = seed_session(&state.db, user.id, "run-1").await;
+    seed_station(&state.db, user.id, "KR4NRC").await;
+    seed_observation(&state.db, user.id, session.id, "KR4NRC").await;
+    seed_observation(&state.db, user.id, session.id, "KR4NRC").await;
+    let app = test_app!(state);
+    let cookie = login!(app, user.id, false);
+
+    // Lowercase in the URL still resolves.
+    let req = test::TestRequest::get()
+        .uri("/stations/kr4nrc")
+        .cookie(cookie.clone())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+    let body = test::read_body(resp).await;
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("KR4NRC"));
+    assert!(
+        body.contains("Log as QSO"),
+        "unpromoted hearings offer the action"
+    );
+
+    let missing = test::TestRequest::get()
+        .uri("/stations/W9XYZ")
+        .cookie(cookie)
+        .to_request();
+    assert_eq!(test::call_service(&app, missing).await.status(), 404);
+}
+
+#[actix_web::test]
+async fn promoting_from_the_page_creates_a_contact() {
+    let state = test_state().await;
+    let user = seed_user(&state.db, "op@example.com").await;
+    let session = seed_session(&state.db, user.id, "run-1").await;
+    seed_station(&state.db, user.id, "KR4NRC").await;
+    let observation = seed_observation(&state.db, user.id, session.id, "KR4NRC").await;
+    let app = test_app!(state);
+    let cookie = login!(app, user.id, false);
+
+    let req = test::TestRequest::post()
+        .uri(&format!("/observations/{}/promote", observation.id))
+        .cookie(cookie.clone())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+    let body = test::read_body(resp).await;
+    let body = String::from_utf8_lossy(&body);
+    assert!(
+        body.contains("in logbook"),
+        "the row flips to the promoted state"
+    );
+
+    // It really is in the logbook now.
+    let req = test::TestRequest::get()
+        .uri("/logbook")
+        .cookie(cookie.clone())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(String::from_utf8_lossy(&test::read_body(resp).await).contains("KR4NRC"));
+
+    // A double-click must not log a second QSO.
+    let again = test::TestRequest::post()
+        .uri(&format!("/observations/{}/promote", observation.id))
+        .cookie(cookie.clone())
+        .to_request();
+    assert_eq!(test::call_service(&app, again).await.status(), 200);
+    use sea_orm::EntityTrait;
+    let contacts = entity::contacts::Entity::find()
+        .all(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        contacts.len(),
+        1,
+        "promoting twice must not log a second QSO"
+    );
+
+    // And another user can't promote someone else's observation.
+    let other = seed_user(&state.db, "other@example.com").await;
+    let their_cookie = login!(app, other.id, false);
+    let theirs = test::TestRequest::post()
+        .uri(&format!("/observations/{}/promote", observation.id))
+        .cookie(their_cookie)
+        .to_request();
+    assert_eq!(test::call_service(&app, theirs).await.status(), 404);
+}
+
+#[actix_web::test]
+async fn sessions_page_and_detail_render() {
+    let state = test_state().await;
+    let user = seed_user(&state.db, "op@example.com").await;
+    let app = test_app!(state);
+    let cookie = login!(app, user.id, false);
+
+    let req = test::TestRequest::get()
+        .uri("/sessions")
+        .cookie(cookie.clone())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+    assert!(String::from_utf8_lossy(&test::read_body(resp).await).contains("No sessions yet"));
+
+    let session = seed_session(&state.db, user.id, "run-1").await;
+    seed_observation(&state.db, user.id, session.id, "KR4NRC").await;
+    seed_station(&state.db, user.id, "KR4NRC").await;
+
+    let req = test::TestRequest::get()
+        .uri("/sessions")
+        .cookie(cookie.clone())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let body = test::read_body(resp).await;
+    let body = String::from_utf8_lossy(&body);
+    // Unlabelled sessions fall back to kind + date, and an unclosed one is
+    // shown as still running rather than being quietly given an end time.
+    assert!(body.contains("monitor"));
+    assert!(body.contains("in progress"));
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/sessions/{}", session.id))
+        .cookie(cookie.clone())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+    assert!(String::from_utf8_lossy(&test::read_body(resp).await).contains("KR4NRC"));
+
+    // Another user's session is not visible.
+    let other = seed_user(&state.db, "other@example.com").await;
+    let theirs = seed_session(&state.db, other.id, "their-run").await;
+    let req = test::TestRequest::get()
+        .uri(&format!("/sessions/{}", theirs.id))
+        .cookie(cookie)
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), 404);
+}
+
+// ---------------------------------------------------------------------------
 // REST API — monitoring (sessions, observations, stations)
 // ---------------------------------------------------------------------------
 

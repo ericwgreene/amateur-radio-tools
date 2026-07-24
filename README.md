@@ -30,6 +30,10 @@ disabled), so you can start immediately and wire up Auth0 when you're ready.
 | `GET /dashboard` | **required** | The signed-in user's profile & account timestamps. |
 | `GET /logbook` | **required** | The **logbook**: list contacts, add one (with live callsign lookup), delete — all via HTMX. |
 | `POST /logbook`, `DELETE /logbook/{id}` | **required** | Add / remove a contact; return the refreshed table body. |
+| `GET /stations` | **required** | **Stations**: every callsign ever heard, once each, with live search and sorting. |
+| `GET /stations/{callsign}` | **required** | One station: its details and every time it was heard. |
+| `GET /sessions` · `GET /sessions/{id}` | **required** | Monitoring runs, nets, and contests, and what each turned up. |
+| `POST /observations/{id}/promote` | **required** | HTMX: copy a heard station into the logbook as a QSO. |
 | `GET /settings/tokens` | **required** | Create & revoke **API tokens**. |
 | `POST /settings/tokens`, `POST /settings/tokens/{id}/revoke` | **required** | Manage tokens (the secret is shown once). |
 | `GET /admin` | **role: `admin`** | Lists all users — demonstrates role-based authorization. |
@@ -255,6 +259,11 @@ Three resources:
 - **`observations`** — one heard transmission, belonging to a session.
 - **`stations`** — the rollup: one row per callsign you have *ever* heard, with first/last
   heard and a hearing count. This is the "unique contacts over time" log.
+
+In the browser these are **Stations** and **Sessions**. Heard a station and then actually
+worked it? *Log as QSO* on the station page copies that hearing into the logbook — which
+is the only thing that moves a row from one side to the other, since `times_worked` is
+counted from `contacts` rather than stored.
 
 ```bash
 # Upload a batch of hearings. The session travels with the batch and is created or
