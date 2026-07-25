@@ -4,7 +4,7 @@
 //! happened during Tuesday's net" — a run at a time, with the stations it turned
 //! up.
 
-use actix_web::{get, web};
+use actix_web::{HttpRequest, HttpResponse, get, web};
 use askama::Template;
 use askama_web::WebTemplate;
 use sea_orm::sea_query::{Expr, Func, SimpleExpr};
@@ -12,10 +12,11 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
 use crate::auth::session::{AuthedUser, SessionUser};
 use crate::error::AppError;
-use crate::routes::dash;
 use crate::routes::stations::session_title;
+use crate::routes::{AUTO_REFRESH_SECS, auto_refresh_cookie, auto_refresh_pref, dash};
 use crate::state::AppState;
 use entity::{observations, sessions, stations};
+use serde::Deserialize;
 
 const PAGE_LIMIT: u64 = 200;
 
@@ -156,24 +157,56 @@ struct SessionDetailPage {
     session: SessionView,
     notes: String,
     hearings: Vec<SessionHearingView>,
+    auto_refresh: bool,
+    refresh_secs: u32,
 }
 
-#[get("/sessions/{id}")]
-pub async fn session_detail(
+/// Fragment: just the hearing rows, for the auto-refresh poll.
+#[derive(Template, WebTemplate)]
+#[template(path = "partials/session_hearing_rows.html")]
+pub struct SessionHearingRows {
+    hearings: Vec<SessionHearingView>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DetailQuery {
+    /// Set by the auto-refresh toggle link; absent on an ordinary visit.
+    pub auto: Option<String>,
+}
+
+/// `GET /sessions/{id}/rows` — the hearing rows alone.
+///
+/// Registered as a distinct path rather than a query flag on the page route so
+/// the poll can't accidentally return a whole page. No conflict with
+/// `/sessions/{id}`: different segment counts.
+#[get("/sessions/{id}/rows")]
+pub async fn session_rows(
     user: AuthedUser,
     state: web::Data<AppState>,
     path: web::Path<i64>,
-) -> Result<SessionDetailPage, AppError> {
+) -> Result<SessionHearingRows, AppError> {
     let id = path.into_inner();
-    let model = sessions::Entity::find_by_id(id)
+    // Confirm ownership before returning anything: the fragment is as sensitive
+    // as the page it belongs to.
+    sessions::Entity::find_by_id(id)
         .filter(sessions::Column::UserId.eq(user.0.id))
         .one(&state.db)
         .await?
         .ok_or(AppError::NotFound)?;
 
+    let (hearings, _) = load_hearings(&state, user.0.id, id).await?;
+    Ok(SessionHearingRows { hearings })
+}
+
+/// The hearings for a session, plus the distinct callsigns among them.
+async fn load_hearings(
+    state: &AppState,
+    user_id: i64,
+    session_id: i64,
+) -> Result<(Vec<SessionHearingView>, usize), AppError> {
     let rows = observations::Entity::find()
-        .filter(observations::Column::UserId.eq(user.0.id))
-        .filter(observations::Column::SessionId.eq(id))
+        .filter(observations::Column::UserId.eq(user_id))
+        .filter(observations::Column::SessionId.eq(session_id))
         .order_by_desc(observations::Column::HeardAt)
         .limit(PAGE_LIMIT)
         .all(&state.db)
@@ -181,23 +214,7 @@ pub async fn session_detail(
 
     let unique: std::collections::HashSet<&str> =
         rows.iter().map(|o| o.callsign.as_str()).collect();
-
-    let view = SessionView {
-        id: model.id,
-        title: session_title(&model),
-        kind: model.kind.clone(),
-        started: model.started_at.format("%Y-%m-%d %H:%M").to_string(),
-        duration: duration_text(&model),
-        band: dash(model.band.clone()),
-        mode: dash(model.mode.clone()),
-        frequency: model
-            .frequency_mhz
-            .map(|f| format!("{f:.3}"))
-            .unwrap_or_else(|| "—".to_string()),
-        operator: dash(model.operator_callsign.clone()),
-        heard: rows.len() as u64,
-        unique_stations: unique.len() as u64,
-    };
+    let unique_count = unique.len();
 
     // Licensee names live once on the station rollup rather than being copied
     // onto every hearing, so fetch them for the callsigns in this session — one
@@ -207,7 +224,7 @@ pub async fn session_detail(
         Default::default()
     } else {
         stations::Entity::find()
-            .filter(stations::Column::UserId.eq(user.0.id))
+            .filter(stations::Column::UserId.eq(user_id))
             .filter(stations::Column::Callsign.is_in(calls))
             .all(&state.db)
             .await?
@@ -232,12 +249,65 @@ pub async fn session_detail(
         })
         .collect();
 
-    Ok(SessionDetailPage {
+    Ok((hearings, unique_count))
+}
+
+#[get("/sessions/{id}")]
+pub async fn session_detail(
+    req: HttpRequest,
+    user: AuthedUser,
+    state: web::Data<AppState>,
+    path: web::Path<i64>,
+    query: web::Query<DetailQuery>,
+) -> Result<HttpResponse, AppError> {
+    let id = path.into_inner();
+    let model = sessions::Entity::find_by_id(id)
+        .filter(sessions::Column::UserId.eq(user.0.id))
+        .one(&state.db)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    let (hearings, unique_count) = load_hearings(&state, user.0.id, id).await?;
+    let auto_refresh = auto_refresh_pref(&req, query.auto.as_deref());
+
+    let view = SessionView {
+        id: model.id,
+        title: session_title(&model),
+        kind: model.kind.clone(),
+        started: model.started_at.format("%Y-%m-%d %H:%M").to_string(),
+        duration: duration_text(&model),
+        band: dash(model.band.clone()),
+        mode: dash(model.mode.clone()),
+        frequency: model
+            .frequency_mhz
+            .map(|f| format!("{f:.3}"))
+            .unwrap_or_else(|| "—".to_string()),
+        operator: dash(model.operator_callsign.clone()),
+        heard: hearings.len() as u64,
+        unique_stations: unique_count as u64,
+    };
+
+    let page = SessionDetailPage {
         current_user: Some(user.0),
         notes: dash(model.notes),
         session: view,
         hearings,
-    })
+        auto_refresh,
+        refresh_secs: AUTO_REFRESH_SECS,
+    };
+    // Rendered by hand rather than returned as a template, because the response
+    // needs a Set-Cookie header when the toggle was used.
+    let body = page.render().map_err(anyhow::Error::new)?;
+
+    let mut response = HttpResponse::Ok();
+    response.content_type("text/html; charset=utf-8");
+    if query.auto.is_some() {
+        response.cookie(auto_refresh_cookie(
+            auto_refresh,
+            state.config.cookie_secure,
+        ));
+    }
+    Ok(response.body(body))
 }
 
 #[cfg(test)]

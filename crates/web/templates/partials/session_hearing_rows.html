@@ -1,0 +1,27 @@
+{% if hearings.is_empty() %}
+<tr>
+  <td colspan="7" class="px-4 py-10 text-center text-slate-500">
+    Nothing with a recognized callsign was heard during this session.
+  </td>
+</tr>
+{% else %} {% for h in hearings %}
+<tr class="hover:bg-slate-800/50">
+  <td class="px-3 py-2 whitespace-nowrap text-slate-400">{{ h.heard_at }}</td>
+  <td class="px-3 py-2 font-mono font-semibold whitespace-nowrap">
+    <a href="/stations/{{ h.callsign }}" class="text-indigo-400 hover:text-indigo-300"
+      >{{ h.callsign }}</a
+    >
+  </td>
+  <td class="px-3 py-2 text-slate-300">{{ h.name }}</td>
+  <td class="px-3 py-2 text-slate-300">{{ h.country }}</td>
+  <td class="px-3 py-2 font-mono text-slate-400">{{ h.duration }}</td>
+  <td class="px-3 py-2 max-w-md truncate text-slate-400" title="{{ h.transcript }}">
+    {{ h.transcript }}
+  </td>
+  <td class="px-3 py-2 text-right whitespace-nowrap">
+    {% if h.promoted %}
+    <span class="text-xs text-emerald-400">✓ in logbook</span>
+    {% endif %}
+  </td>
+</tr>
+{% endfor %} {% endif %}

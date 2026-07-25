@@ -4,7 +4,7 @@
 //! tells you who is actually out there and how often you hear them. One row per
 //! callsign, no matter how many times it has come up.
 
-use actix_web::{get, post, web};
+use actix_web::{HttpRequest, HttpResponse, get, post, web};
 use askama::Template;
 use askama_web::WebTemplate;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use crate::auth::session::{AuthedUser, SessionUser};
 use crate::error::AppError;
-use crate::routes::dash;
+use crate::routes::{AUTO_REFRESH_SECS, auto_refresh_cookie, auto_refresh_pref, dash};
 use crate::services::observations::{self as obs_service, PromoteDetails};
 use crate::services::stations as station_service;
 use crate::state::AppState;
@@ -43,6 +43,46 @@ pub struct RosterQuery {
     pub q: Option<String>,
     /// `last_heard` (default), `times_heard`, `first_heard`, or `callsign`.
     pub order: Option<String>,
+    /// Set by the auto-refresh toggle link; absent on an ordinary visit.
+    pub auto: Option<String>,
+}
+
+/// The sort orders the roster offers, and their labels.
+///
+/// Rendered from here rather than hardcoded in the template so the active one can
+/// be marked `selected` — otherwise the dropdown resets to "Last heard" on every
+/// reload while the rows stay sorted some other way.
+pub const ORDERS: [(&str, &str); 4] = [
+    ("last_heard", "Last heard"),
+    ("times_heard", "Times heard"),
+    ("first_heard", "First heard"),
+    ("callsign", "Callsign"),
+];
+
+/// One entry in the sort dropdown.
+pub struct OrderOption {
+    pub value: &'static str,
+    pub label: &'static str,
+    pub selected: bool,
+}
+
+fn order_options(active: &str) -> Vec<OrderOption> {
+    ORDERS
+        .iter()
+        .map(|(value, label)| OrderOption {
+            value,
+            label,
+            selected: *value == active,
+        })
+        .collect()
+}
+
+/// The order actually in force, defaulting when the query says nothing usable.
+fn active_order(query: &RosterQuery) -> String {
+    match query.order.as_deref() {
+        Some(o) if ORDERS.iter().any(|(v, _)| *v == o) => o.to_string(),
+        _ => ORDERS[0].0.to_string(),
+    }
 }
 
 async fn load_roster(
@@ -93,6 +133,10 @@ struct StationsPage {
     current_user: Option<SessionUser>,
     stations: Vec<StationView>,
     query: String,
+    orders: Vec<OrderOption>,
+    /// Drives whether the tbody carries a polling trigger at all.
+    auto_refresh: bool,
+    refresh_secs: u32,
 }
 
 /// Fragment: just the table body, swapped in by the search box.
@@ -104,17 +148,41 @@ struct StationRows {
 
 #[get("/stations")]
 pub async fn stations_page(
+    req: HttpRequest,
     user: AuthedUser,
     state: web::Data<AppState>,
     query: web::Query<RosterQuery>,
-) -> Result<StationsPage, AppError> {
+) -> Result<HttpResponse, AppError> {
     let own = own_callsign(&state, user.0.id).await?;
     let stations = load_roster(&state, user.0.id, own.as_deref(), &query).await?;
-    Ok(StationsPage {
+    let auto_refresh = auto_refresh_pref(&req, query.auto.as_deref());
+
+    let page = StationsPage {
         query: query.q.clone().unwrap_or_default(),
+        // The sort and search live inside the controls form, so the browser
+        // resubmits their current values when the toggle is pressed — nothing
+        // needs to be threaded into a URL here.
+        orders: order_options(&active_order(&query)),
         current_user: Some(user.0),
         stations,
-    })
+        auto_refresh,
+        refresh_secs: AUTO_REFRESH_SECS,
+    };
+    // Rendered by hand rather than returned as a template, because the response
+    // needs a Set-Cookie header when the toggle was used.
+    let body = page.render().map_err(anyhow::Error::new)?;
+
+    let mut response = HttpResponse::Ok();
+    response.content_type("text/html; charset=utf-8");
+    // Only write the cookie when the toggle was actually used, so an ordinary
+    // visit doesn't set one for a preference the operator never expressed.
+    if query.auto.is_some() {
+        response.cookie(auto_refresh_cookie(
+            auto_refresh,
+            state.config.cookie_secure,
+        ));
+    }
+    Ok(response.body(body))
 }
 
 /// HTMX: the roster body alone, for live search and re-sorting.

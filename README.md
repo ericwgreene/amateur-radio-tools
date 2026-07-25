@@ -265,6 +265,16 @@ worked it? *Log as QSO* on the station page copies that hearing into the logbook
 is the only thing that moves a row from one side to the other, since `times_worked` is
 counted from `contacts` rather than stored.
 
+**Both refresh themselves.** The Stations roster and a session's hearing list re-fetch
+their rows every 30 seconds, so a net you're monitoring fills in without touching the
+page. The **Live · 30s** control toggles it off (and back on); the choice is remembered in
+a cookie. Two details worth knowing:
+
+- A refresh keeps whatever you've typed in the search box and picked in the sort — it
+  re-sends them rather than resetting to an unfiltered list.
+- Polling pauses while the browser tab is hidden, so a page left open on the shack monitor
+  isn't hitting the server all night. It resumes when you switch back.
+
 ```bash
 # Upload a batch of hearings. The session travels with the batch and is created or
 # updated as a side effect, so a client never has to learn a server-assigned id.

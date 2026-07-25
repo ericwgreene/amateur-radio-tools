@@ -6,7 +6,13 @@ endblock %} {% block content %}
   records stations you <em>worked</em> — this is simply who has been on the air.
 </p>
 
-<section class="mt-6 flex flex-wrap items-end gap-4">
+{#
+  The controls sit in a real GET form so the toggle submits whatever is
+  *currently* in the search box and sort select. A plain link can't: its href is
+  rendered when the page loads, so clicking it after typing would silently throw
+  the search away.
+#}
+<form method="get" action="/stations" class="mt-6 flex flex-wrap items-end gap-4">
   <label class="block flex-1 min-w-56">
     <span class="text-sm font-medium text-slate-300">Search callsign</span>
     <input
@@ -33,13 +39,35 @@ endblock %} {% block content %}
       hx-swap="innerHTML"
       hx-include="[name='q']"
     >
-      <option value="last_heard">Last heard</option>
-      <option value="times_heard">Times heard</option>
-      <option value="first_heard">First heard</option>
-      <option value="callsign">Callsign</option>
+      {% for o in orders %}
+      <option value="{{ o.value }}" {% if o.selected %}selected{% endif %}>
+        {{ o.label }}
+      </option>
+      {% endfor %}
     </select>
   </label>
-</section>
+
+  <div class="pb-1">
+    {# Submitting reloads the page, which is what brings the tbody back with (or
+       without) its polling trigger — the trigger is an attribute, so it can only
+       change on a full render. #}
+    <button
+      type="submit"
+      name="auto"
+      value="{% if auto_refresh %}off{% else %}on{% endif %}"
+      class="inline-flex items-center gap-2 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800"
+      title="{% if auto_refresh %}Stop refreshing this page automatically{% else %}Refresh this page automatically as new stations are heard{% endif %}"
+    >
+      {% if auto_refresh %}
+      <span class="h-2 w-2 rounded-full bg-emerald-400" aria-hidden="true"></span>
+      Live · {{ refresh_secs }}s
+      {% else %}
+      <span class="h-2 w-2 rounded-full bg-slate-600" aria-hidden="true"></span>
+      Paused
+      {% endif %}
+    </button>
+  </div>
+</form>
 
 <section
   class="mt-6 overflow-x-auto rounded-xl border border-slate-800 bg-slate-900 shadow-sm"
@@ -57,7 +85,31 @@ endblock %} {% block content %}
         <th class="px-3 py-3 text-right font-medium">Worked</th>
       </tr>
     </thead>
-    <tbody id="stations-body" class="divide-y divide-slate-800">
+    {#
+      The polling trigger lives on the tbody, which survives the search box's
+      innerHTML swaps — so the partial stays pure <tr>s and there is only ever
+      one fragment shape.
+
+      hx-include is load-bearing: without it a refresh would re-render unfiltered
+      and silently discard whatever is typed in the search box.
+
+      [!document.hidden] stops a forgotten tab polling all day. HTMX has no
+      built-in visibility handling, and it treats a *throwing* filter as "skip" —
+      so if this expression ever fails to compile (e.g. a strict script-src CSP,
+      which the app does not set today), refreshing stops silently rather than
+      erroring. Change it with that in mind.
+    #}
+    <tbody
+      id="stations-body"
+      class="divide-y divide-slate-800"
+      {% if auto_refresh %}
+      hx-get="/stations/rows"
+      hx-trigger="every {{ refresh_secs }}s [!document.hidden]"
+      hx-target="#stations-body"
+      hx-swap="innerHTML"
+      hx-include="[name='q'],[name='order']"
+      {% endif %}
+    >
       {% include "partials/station_rows.html" %}
     </tbody>
   </table>
