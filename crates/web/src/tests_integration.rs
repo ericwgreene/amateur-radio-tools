@@ -480,6 +480,67 @@ async fn promoting_from_the_page_creates_a_contact() {
     assert_eq!(test::call_service(&app, theirs).await.status(), 404);
 }
 
+/// The sessions list counts hearings and distinct stations with one grouped
+/// query rather than a query per row. Aggregation is easy to get subtly wrong,
+/// so pin the numbers — including a session with nothing in it.
+#[actix_web::test]
+async fn sessions_list_counts_hearings_and_distinct_stations() {
+    let state = test_state().await;
+    let user = seed_user(&state.db, "op@example.com").await;
+    let busy = seed_session(&state.db, user.id, "busy").await;
+    let quiet = seed_session(&state.db, user.id, "quiet").await;
+
+    // Three hearings across two distinct callsigns.
+    seed_observation(&state.db, user.id, busy.id, "KR4NRC").await;
+    seed_observation(&state.db, user.id, busy.id, "KR4NRC").await;
+    seed_observation(&state.db, user.id, busy.id, "W1AW").await;
+
+    // Another user's rows must not leak into either count.
+    let other = seed_user(&state.db, "other@example.com").await;
+    let theirs = seed_session(&state.db, other.id, "theirs").await;
+    seed_observation(&state.db, other.id, theirs.id, "VE3XYZ").await;
+
+    let app = test_app!(state);
+    let cookie = login!(app, user.id, false);
+    let req = test::TestRequest::get()
+        .uri("/sessions")
+        .cookie(cookie)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+    let body = test::read_body(resp).await;
+    let body = String::from_utf8_lossy(&body);
+
+    // The template wraps cell values in whitespace, so compare against a
+    // whitespace-free copy of each row.
+    let squashed: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+    let rows: Vec<&str> = squashed.split("<tr").collect();
+    let row_for = |id: i64| {
+        rows.iter()
+            .find(|r| r.contains(&format!("/sessions/{id}\"")))
+            .copied()
+            .unwrap_or_else(|| panic!("no row for session {id}"))
+    };
+
+    // The two count columns are stations-then-heard, so assert the pair in order:
+    // a swapped column would still contain both numbers individually.
+    let busy_row = row_for(busy.id);
+    assert!(
+        busy_row.contains(">2</td>") && busy_row.contains(">3</td>"),
+        "expected 2 distinct stations and 3 hearings: {busy_row}"
+    );
+    assert!(
+        busy_row.find(">2</td>") < busy_row.find(">3</td>"),
+        "stations column comes before hearings: {busy_row}"
+    );
+
+    let quiet_row = row_for(quiet.id);
+    assert!(
+        quiet_row.matches(">0</td>").count() >= 2,
+        "a session with no hearings still renders zeroes: {quiet_row}"
+    );
+}
+
 #[actix_web::test]
 async fn sessions_page_and_detail_render() {
     let state = test_state().await;
@@ -527,6 +588,191 @@ async fn sessions_page_and_detail_render() {
         .cookie(cookie)
         .to_request();
     assert_eq!(test::call_service(&app, req).await.status(), 404);
+}
+
+// ---------------------------------------------------------------------------
+// Auto-refresh
+// ---------------------------------------------------------------------------
+
+/// GET a page as a signed-in user and return its body, asserting a 200.
+///
+/// A macro rather than a function because the test app's type is unnameable
+/// without pulling in `actix_http` — the same reason `test_app!` is a macro.
+macro_rules! body_of {
+    ($app:expr, $uri:expr, $cookie:expr) => {{
+        let req = test::TestRequest::get()
+            .uri($uri)
+            .cookie($cookie)
+            .to_request();
+        let resp = test::call_service(&$app, req).await;
+        assert_eq!(resp.status(), 200, "{}", $uri);
+        String::from_utf8_lossy(&test::read_body(resp).await).to_string()
+    }};
+}
+
+#[actix_web::test]
+async fn stations_page_polls_by_default_and_the_toggle_turns_it_off() {
+    let state = test_state().await;
+    let user = seed_user(&state.db, "op@example.com").await;
+    seed_station(&state.db, user.id, "KR4NRC").await;
+    let app = test_app!(state);
+    let cookie = login!(app, user.id, false);
+
+    // Default: on, with the filter that stops a hidden tab polling all day.
+    let body = body_of!(app, "/stations", cookie.clone());
+    assert!(body.contains("hx-trigger=\"every 30s [!document.hidden]\""));
+    assert!(
+        body.contains("hx-include=\"[name='q'],[name='order']\""),
+        "a poll must carry the search and sort, or it would wipe them"
+    );
+    assert!(body.contains("Live · 30s"));
+
+    // Toggling off removes the trigger entirely and stores the choice.
+    let req = test::TestRequest::get()
+        .uri("/stations?auto=off")
+        .cookie(cookie.clone())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+    let stored = resp
+        .response()
+        .cookies()
+        .find(|c| c.name() == "art_autorefresh")
+        .expect("the preference is persisted");
+    assert_eq!(stored.value(), "off");
+    let off_cookie = actix_web::cookie::Cookie::new("art_autorefresh", "off");
+
+    let body = String::from_utf8_lossy(&test::read_body(resp).await).to_string();
+    assert!(!body.contains("hx-trigger=\"every"), "no polling when off");
+    assert!(body.contains("Paused"));
+
+    // And it sticks on an ordinary visit afterwards.
+    let req = test::TestRequest::get()
+        .uri("/stations")
+        .cookie(cookie.clone())
+        .cookie(off_cookie)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let body = String::from_utf8_lossy(&test::read_body(resp).await).to_string();
+    assert!(
+        !body.contains("hx-trigger=\"every"),
+        "the stored preference survives a plain page load"
+    );
+
+    // Turning it back on rewrites the cookie.
+    let req = test::TestRequest::get()
+        .uri("/stations?auto=on")
+        .cookie(cookie)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.response()
+            .cookies()
+            .find(|c| c.name() == "art_autorefresh")
+            .unwrap()
+            .value(),
+        "on"
+    );
+}
+
+/// An ordinary visit must not set a cookie for a preference nobody expressed.
+#[actix_web::test]
+async fn a_plain_visit_does_not_write_the_preference_cookie() {
+    let state = test_state().await;
+    let user = seed_user(&state.db, "op@example.com").await;
+    let app = test_app!(state);
+    let cookie = login!(app, user.id, false);
+
+    let req = test::TestRequest::get()
+        .uri("/stations")
+        .cookie(cookie)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(
+        resp.response()
+            .cookies()
+            .all(|c| c.name() != "art_autorefresh")
+    );
+}
+
+/// The toggle carries the current search and sort, so flipping it doesn't
+/// silently dump the operator back to an unfiltered list.
+#[actix_web::test]
+async fn the_toggle_preserves_search_and_sort() {
+    let state = test_state().await;
+    let user = seed_user(&state.db, "op@example.com").await;
+    seed_station(&state.db, user.id, "KR4NRC").await;
+    let app = test_app!(state);
+    let cookie = login!(app, user.id, false);
+
+    let body = body_of!(app, "/stations?q=KR&order=times_heard", cookie);
+
+    // The toggle is a submit button inside the controls form, not a link, so the
+    // browser sends whatever is *currently* in the search box and sort select.
+    // A server-rendered href would carry the values from page load and silently
+    // discard anything typed since.
+    assert!(
+        body.contains("<form method=\"get\" action=\"/stations\""),
+        "the controls must be a real GET form"
+    );
+    assert!(body.contains("name=\"auto\""));
+    assert!(body.contains("value=\"off\""), "the button flips the state");
+    assert!(
+        body.contains("value=\"KR\""),
+        "the search box is inside the form, pre-filled"
+    );
+    // ...and the dropdown actually shows the sort that's in force.
+    assert!(
+        body.contains("value=\"times_heard\" selected"),
+        "the sort select must reflect the active order"
+    );
+}
+
+#[actix_web::test]
+async fn session_detail_polls_its_own_rows_endpoint() {
+    let state = test_state().await;
+    let user = seed_user(&state.db, "op@example.com").await;
+    let session = seed_session(&state.db, user.id, "run-1").await;
+    seed_observation(&state.db, user.id, session.id, "KR4NRC").await;
+    let app = test_app!(state);
+    let cookie = login!(app, user.id, false);
+
+    let body = body_of!(app, &format!("/sessions/{}", session.id), cookie.clone());
+    assert!(body.contains(&format!("hx-get=\"/sessions/{}/rows\"", session.id)));
+    assert!(body.contains("every 30s [!document.hidden]"));
+
+    let body = body_of!(
+        app,
+        &format!("/sessions/{}?auto=off", session.id),
+        cookie.clone()
+    );
+    assert!(!body.contains("hx-trigger=\"every"));
+
+    // The fragment is rows only, and is owner-scoped like the page it feeds.
+    let body = body_of!(
+        app,
+        &format!("/sessions/{}/rows", session.id),
+        cookie.clone()
+    );
+    assert!(body.contains("KR4NRC"));
+    assert!(!body.contains("<html"), "a fragment, not a page");
+
+    let other = seed_user(&state.db, "other@example.com").await;
+    let theirs = seed_session(&state.db, other.id, "theirs").await;
+    let req = test::TestRequest::get()
+        .uri(&format!("/sessions/{}/rows", theirs.id))
+        .cookie(cookie)
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), 404);
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/sessions/{}/rows", session.id))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        303,
+        "signed out is a redirect, not a leak"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -12,15 +12,17 @@
 //!   so the client can drop them and move on.
 
 use chrono::{DateTime, Utc};
+use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QuerySelect, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QuerySelect, Set,
+    TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::services::sessions::{self, SessionInput};
-use crate::services::stations::{self, HeardInput};
+use crate::services::stations::{self as station_service, HeardInput};
 use crate::tools::callsign;
-use entity::observations;
+use entity::{contacts, observations, stations};
 
 /// The most observations one request may carry.
 ///
@@ -90,6 +92,17 @@ pub async fn ingest_batch(
     let mut rejected = Vec::new();
     let mut candidates = Vec::new();
     for item in items {
+        // A blank key can't do its job. Worse, two of them in one batch would
+        // collide on the unique index and turn the whole request into a 500 —
+        // which is precisely the wedge the per-item rejection exists to avoid,
+        // so it has to be caught here rather than by the database.
+        if item.client_key.trim().is_empty() {
+            rejected.push(Rejected {
+                client_key: item.client_key,
+                reason: "client_key is required and must not be blank".to_string(),
+            });
+            continue;
+        }
         let normalized = callsign::normalize(&item.callsign);
         if !callsign::is_valid(&normalized) {
             rejected.push(Rejected {
@@ -166,7 +179,7 @@ pub async fn ingest_batch(
     // 4. Fold into the station rollup. One call per hearing keeps `times_heard` honest.
     let mut touched = std::collections::HashSet::new();
     for (normalized, item) in &fresh {
-        stations::record_heard(
+        station_service::record_heard(
             &tx,
             user_id,
             &HeardInput {
@@ -193,12 +206,156 @@ pub async fn ingest_batch(
     })
 }
 
+/// QSO details supplied when promoting a hearing. All optional: what isn't given
+/// is carried over from the observation and the station rollup.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct PromoteDetails {
+    pub rst_sent: Option<String>,
+    pub rst_received: Option<String>,
+    pub worked_at: Option<DateTime<Utc>>,
+    pub band: Option<String>,
+    pub mode: Option<String>,
+    pub frequency_mhz: Option<f64>,
+    pub notes: Option<String>,
+}
+
+/// The outcome of a promote. `created` is false when the observation had already
+/// been promoted, so a caller can answer 201 vs 200.
+pub struct Promotion {
+    pub contact: contacts::Model,
+    pub created: bool,
+}
+
+/// Turn a heard transmission into a logbook contact.
+///
+/// Hearing a station and working it are different events, which is why they live
+/// in different tables; this is the bridge between them.
+///
+/// Promoting the same observation twice must converge on one contact rather than
+/// logging the QSO again — a client retrying a request whose response it never
+/// saw, or an operator double-clicking the button, should be harmless. Two things
+/// enforce that, and neither is sufficient alone:
+///
+/// * the insert and the back-reference share a transaction, so a failure between
+///   them can't leave a contact that no observation points at (which the next
+///   attempt would then duplicate); and
+/// * the back-reference is written with a `promoted_contact_id IS NULL` guard, so
+///   if a concurrent promote won the race we roll our own insert back and return
+///   the contact that actually landed.
+///
+/// Returns `None` when the observation doesn't exist or isn't the caller's.
+pub async fn promote(
+    db: &DatabaseConnection,
+    user_id: i64,
+    observation_id: i64,
+    details: PromoteDetails,
+) -> Result<Option<Promotion>, sea_orm::DbErr> {
+    let Some(observation) = observations::Entity::find_by_id(observation_id)
+        .filter(observations::Column::UserId.eq(user_id))
+        .one(db)
+        .await?
+    else {
+        return Ok(None);
+    };
+
+    // Already promoted: hand back the contact we made last time.
+    if let Some(existing) = promoted_contact(db, user_id, &observation).await? {
+        return Ok(Some(Promotion {
+            contact: existing,
+            created: false,
+        }));
+    }
+
+    // Carry over whatever the station rollup already knows, so a promoted contact
+    // isn't emptier than the roster row it came from.
+    let station = stations::Entity::find()
+        .filter(stations::Column::UserId.eq(user_id))
+        .filter(stations::Column::Callsign.eq(&observation.callsign))
+        .one(db)
+        .await?;
+
+    let tx = db.begin().await?;
+    let now = Utc::now();
+    let contact = contacts::ActiveModel {
+        user_id: Set(user_id),
+        callsign: Set(observation.callsign.clone()),
+        worked_at: Set(details.worked_at.unwrap_or(observation.heard_at)),
+        band: Set(details.band.or_else(|| observation.band.clone())),
+        mode: Set(details.mode.or_else(|| observation.mode.clone())),
+        frequency_mhz: Set(details.frequency_mhz.or(observation.frequency_mhz)),
+        rst_sent: Set(details.rst_sent),
+        rst_received: Set(details.rst_received),
+        grid: Set(station.as_ref().and_then(|s| s.grid.clone())),
+        name: Set(station.as_ref().and_then(|s| s.name.clone())),
+        qth: Set(station.as_ref().and_then(|s| s.qth.clone())),
+        country: Set(observation.country.clone()),
+        notes: Set(details.notes),
+        created_at: Set(now),
+        updated_at: Set(now),
+        ..Default::default()
+    }
+    .insert(&tx)
+    .await?;
+
+    // The guard: only claim the observation if nobody else already has.
+    let claimed = observations::Entity::update_many()
+        .col_expr(
+            observations::Column::PromotedContactId,
+            Expr::value(contact.id),
+        )
+        .filter(observations::Column::Id.eq(observation_id))
+        .filter(observations::Column::UserId.eq(user_id))
+        .filter(observations::Column::PromotedContactId.is_null())
+        .exec(&tx)
+        .await?;
+
+    if claimed.rows_affected == 0 {
+        // A concurrent promote beat us. Roll back — which also discards the
+        // contact we just inserted — and return whichever one won.
+        tx.rollback().await?;
+        let winner = promoted_contact(db, user_id, &observation).await?;
+        return Ok(winner.map(|contact| Promotion {
+            contact,
+            created: false,
+        }));
+    }
+
+    tx.commit().await?;
+    Ok(Some(Promotion {
+        contact,
+        created: true,
+    }))
+}
+
+/// The contact an observation was already promoted into, if any.
+async fn promoted_contact<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    user_id: i64,
+    observation: &observations::Model,
+) -> Result<Option<contacts::Model>, sea_orm::DbErr> {
+    // Re-read rather than trusting the copy we hold: a racing promote may have
+    // set this since.
+    let Some(fresh) = observations::Entity::find_by_id(observation.id)
+        .filter(observations::Column::UserId.eq(user_id))
+        .one(db)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let Some(contact_id) = fresh.promoted_contact_id else {
+        return Ok(None);
+    };
+    contacts::Entity::find_by_id(contact_id)
+        .filter(contacts::Column::UserId.eq(user_id))
+        .one(db)
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::{seed_user, test_db};
     use chrono::Duration;
-    use entity::stations;
 
     fn session(key: &str) -> SessionInput {
         SessionInput {
@@ -351,6 +508,158 @@ mod tests {
         assert_eq!(out.accepted, 2);
         assert_eq!(out.rejected.len(), 1);
         assert_eq!(out.rejected[0].client_key, "k2");
+    }
+
+    /// A blank key can't identify anything, and two of them in one batch would
+    /// collide on the unique index — turning the whole request into a 500 and
+    /// wedging the client's retry loop forever.
+    #[actix_web::test]
+    async fn a_blank_client_key_is_rejected_rather_than_reaching_the_index() {
+        let db = test_db().await;
+        let user = seed_user(&db, "op@example.com").await;
+        let t = Utc::now();
+
+        let out = ingest_batch(
+            &db,
+            user.id,
+            &session("s1"),
+            vec![
+                obs("", "KR4NRC", t),
+                obs("   ", "W4ABC", t),
+                obs("good", "K4CQ", t),
+            ],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.accepted, 1, "the well-formed row still lands");
+        assert_eq!(out.rejected.len(), 2);
+        assert!(out.rejected.iter().all(|r| r.reason.contains("client_key")));
+    }
+
+    #[actix_web::test]
+    async fn promote_creates_a_contact_once_and_only_once() {
+        let db = test_db().await;
+        let user = seed_user(&db, "op@example.com").await;
+        ingest_batch(
+            &db,
+            user.id,
+            &session("s1"),
+            vec![obs("k1", "KR4NRC", Utc::now())],
+        )
+        .await
+        .unwrap();
+        let observation = observations::Entity::find()
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let first = promote(&db, user.id, observation.id, PromoteDetails::default())
+            .await
+            .unwrap()
+            .expect("the observation exists");
+        assert!(first.created);
+        assert_eq!(first.contact.callsign, "KR4NRC");
+
+        // Enrichment from the station rollup comes across.
+        assert_eq!(first.contact.country.as_deref(), Some("United States"));
+
+        let second = promote(&db, user.id, observation.id, PromoteDetails::default())
+            .await
+            .unwrap()
+            .expect("still there");
+        assert!(
+            !second.created,
+            "a replay reports that it didn't create one"
+        );
+        assert_eq!(second.contact.id, first.contact.id);
+
+        let all = contacts::Entity::find().all(&db).await.unwrap();
+        assert_eq!(all.len(), 1, "exactly one QSO, however many times we asked");
+    }
+
+    #[actix_web::test]
+    async fn promote_honours_supplied_qso_details() {
+        let db = test_db().await;
+        let user = seed_user(&db, "op@example.com").await;
+        ingest_batch(
+            &db,
+            user.id,
+            &session("s1"),
+            vec![obs("k1", "KR4NRC", Utc::now())],
+        )
+        .await
+        .unwrap();
+        let observation = observations::Entity::find()
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let promotion = promote(
+            &db,
+            user.id,
+            observation.id,
+            PromoteDetails {
+                rst_sent: Some("59".into()),
+                rst_received: Some("57".into()),
+                band: Some("20m".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(promotion.contact.rst_sent.as_deref(), Some("59"));
+        assert_eq!(
+            promotion.contact.band.as_deref(),
+            Some("20m"),
+            "an explicit band overrides the one inherited from the session"
+        );
+        // Unspecified fields still fall back to the observation.
+        assert_eq!(promotion.contact.mode.as_deref(), Some("FM"));
+    }
+
+    #[actix_web::test]
+    async fn promote_is_scoped_to_the_owner() {
+        let db = test_db().await;
+        let user = seed_user(&db, "op@example.com").await;
+        let other = seed_user(&db, "other@example.com").await;
+        ingest_batch(
+            &db,
+            user.id,
+            &session("s1"),
+            vec![obs("k1", "KR4NRC", Utc::now())],
+        )
+        .await
+        .unwrap();
+        let observation = observations::Entity::find()
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            promote(&db, other.id, observation.id, PromoteDetails::default())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(contacts::Entity::find().all(&db).await.unwrap().is_empty());
+    }
+
+    #[actix_web::test]
+    async fn promoting_an_unknown_observation_is_none_not_an_error() {
+        let db = test_db().await;
+        let user = seed_user(&db, "op@example.com").await;
+        assert!(
+            promote(&db, user.id, 999_999, PromoteDetails::default())
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[actix_web::test]

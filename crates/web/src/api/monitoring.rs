@@ -14,21 +14,20 @@
 
 use actix_web::{HttpResponse, get, patch, post, web};
 use chrono::{DateTime, Utc};
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter,
-    QueryOrder, QuerySelect, Set,
-};
+use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect};
 use serde::{Deserialize, Serialize};
 
 use crate::api::error::ApiError;
 use crate::api::{Page, Paged};
 use crate::auth::api_token::ApiUser;
-use crate::services::observations::{self as obs_service, MAX_BATCH, ObservationInput};
+use crate::services::observations::{
+    self as obs_service, MAX_BATCH, ObservationInput, PromoteDetails,
+};
 use crate::services::sessions::{self as session_service, SessionInput};
 use crate::services::stations as station_service;
 use crate::state::AppState;
 use crate::tools::callsign;
-use entity::{contacts, observations, sessions, stations};
+use entity::{observations, sessions, stations};
 
 // ---------------------------------------------------------------------------
 // Sessions
@@ -265,85 +264,29 @@ pub async fn list_observations(
     }))
 }
 
-/// Optional QSO details supplied when promoting a hearing into a logbook contact.
-#[derive(Debug, Default, Deserialize)]
-pub struct PromoteInput {
-    pub rst_sent: Option<String>,
-    pub rst_received: Option<String>,
-    pub worked_at: Option<DateTime<Utc>>,
-    pub band: Option<String>,
-    pub mode: Option<String>,
-    pub frequency_mhz: Option<f64>,
-    pub notes: Option<String>,
-}
-
 /// `POST /api/v1/observations/{id}/promote` — turn a hearing into a logbook contact.
 ///
-/// Hearing a station and working it are different events, which is why observations and
-/// contacts are separate tables. This is the bridge: once you actually make the QSO,
-/// the observation you already logged becomes the seed for the logbook entry.
-///
-/// Promoting twice returns `200` with the contact created the first time rather than a
-/// conflict — a client retrying a request whose response it never saw should converge,
-/// not error.
+/// `201` the first time, `200` on a replay with the contact created originally —
+/// a client retrying a request whose response it never saw should converge, not
+/// conflict. See [`crate::services::observations::promote`] for how that holds up
+/// under a failure between the two writes, or two promotes racing.
 #[post("/api/v1/observations/{id}/promote")]
 pub async fn promote_observation(
     user: ApiUser,
     state: web::Data<AppState>,
     path: web::Path<i64>,
-    payload: Option<web::Json<PromoteInput>>,
+    payload: Option<web::Json<PromoteDetails>>,
 ) -> Result<HttpResponse, ApiError> {
-    let input = payload.map(|p| p.into_inner()).unwrap_or_default();
-    let observation = observations::Entity::find_by_id(path.into_inner())
-        .filter(observations::Column::UserId.eq(user.user.id))
-        .one(&state.db)
+    let details = payload.map(|p| p.into_inner()).unwrap_or_default();
+    let promotion = obs_service::promote(&state.db, user.user.id, path.into_inner(), details)
         .await?
         .ok_or(ApiError::NotFound)?;
 
-    if let Some(existing_id) = observation.promoted_contact_id {
-        let existing = contacts::Entity::find_by_id(existing_id)
-            .filter(contacts::Column::UserId.eq(user.user.id))
-            .one(&state.db)
-            .await?
-            .ok_or(ApiError::NotFound)?;
-        return Ok(HttpResponse::Ok().json(existing));
-    }
-
-    // Carry over whatever the station rollup already knows, so a promoted contact isn't
-    // emptier than the roster row it came from.
-    let station = stations::Entity::find()
-        .filter(stations::Column::UserId.eq(user.user.id))
-        .filter(stations::Column::Callsign.eq(&observation.callsign))
-        .one(&state.db)
-        .await?;
-
-    let now = Utc::now();
-    let contact = contacts::ActiveModel {
-        user_id: Set(user.user.id),
-        callsign: Set(observation.callsign.clone()),
-        worked_at: Set(input.worked_at.unwrap_or(observation.heard_at)),
-        band: Set(input.band.or_else(|| observation.band.clone())),
-        mode: Set(input.mode.or_else(|| observation.mode.clone())),
-        frequency_mhz: Set(input.frequency_mhz.or(observation.frequency_mhz)),
-        rst_sent: Set(input.rst_sent),
-        rst_received: Set(input.rst_received),
-        grid: Set(station.as_ref().and_then(|s| s.grid.clone())),
-        name: Set(station.as_ref().and_then(|s| s.name.clone())),
-        qth: Set(station.as_ref().and_then(|s| s.qth.clone())),
-        country: Set(observation.country.clone()),
-        notes: Set(input.notes),
-        created_at: Set(now),
-        updated_at: Set(now),
-        ..Default::default()
-    }
-    .insert(&state.db)
-    .await?;
-
-    let mut active = observation.into_active_model();
-    active.promoted_contact_id = Set(Some(contact.id));
-    active.update(&state.db).await?;
-
-    Ok(HttpResponse::Created().json(contact))
+    Ok(if promotion.created {
+        HttpResponse::Created().json(promotion.contact)
+    } else {
+        HttpResponse::Ok().json(promotion.contact)
+    })
 }
 
 // ---------------------------------------------------------------------------
