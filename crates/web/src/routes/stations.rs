@@ -7,20 +7,17 @@
 use actix_web::{get, post, web};
 use askama::Template;
 use askama_web::WebTemplate;
-use chrono::Utc;
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
-    QuerySelect, Set,
-};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use serde::Deserialize;
 
 use crate::auth::session::{AuthedUser, SessionUser};
 use crate::error::AppError;
 use crate::routes::dash;
+use crate::services::observations::{self as obs_service, PromoteDetails};
 use crate::services::stations as station_service;
 use crate::state::AppState;
 use crate::tools::callsign;
-use entity::{contacts, observations, sessions, stations};
+use entity::{observations, sessions, stations};
 
 /// Most rows one page shows. The roster grows slowly (one row per *distinct*
 /// station), so this is generous rather than a real constraint.
@@ -276,50 +273,22 @@ pub async fn promote(
     state: web::Data<AppState>,
     path: web::Path<i64>,
 ) -> Result<StationHearings, AppError> {
-    let observation = observations::Entity::find_by_id(path.into_inner())
-        .filter(observations::Column::UserId.eq(user.0.id))
-        .one(&state.db)
-        .await?
-        .ok_or(AppError::NotFound)?;
-    let call = observation.callsign.clone();
-
-    // Already promoted: fall through to a re-render rather than erroring, so a
-    // double-click is harmless.
-    if observation.promoted_contact_id.is_none() {
-        let station = stations::Entity::find()
-            .filter(stations::Column::UserId.eq(user.0.id))
-            .filter(stations::Column::Callsign.eq(&call))
-            .one(&state.db)
-            .await?;
-
-        let now = Utc::now();
-        let contact = contacts::ActiveModel {
-            user_id: Set(user.0.id),
-            callsign: Set(call.clone()),
-            worked_at: Set(observation.heard_at),
-            band: Set(observation.band.clone()),
-            mode: Set(observation.mode.clone()),
-            frequency_mhz: Set(observation.frequency_mhz),
-            rst_sent: Set(None),
-            rst_received: Set(None),
-            grid: Set(station.as_ref().and_then(|s| s.grid.clone())),
-            name: Set(station.as_ref().and_then(|s| s.name.clone())),
-            qth: Set(station.as_ref().and_then(|s| s.qth.clone())),
-            country: Set(observation.country.clone()),
-            notes: Set(Some("Promoted from a monitored transmission.".to_string())),
-            created_at: Set(now),
-            updated_at: Set(now),
+    let id = path.into_inner();
+    // Promoting an already-promoted hearing is a no-op that still re-renders, so
+    // a double-click is harmless rather than an error in the operator's face.
+    let promotion = obs_service::promote(
+        &state.db,
+        user.0.id,
+        id,
+        PromoteDetails {
+            notes: Some("Promoted from a monitored transmission.".to_string()),
             ..Default::default()
-        }
-        .insert(&state.db)
-        .await?;
+        },
+    )
+    .await?
+    .ok_or(AppError::NotFound)?;
 
-        let mut active = observation.into_active_model();
-        active.promoted_contact_id = Set(Some(contact.id));
-        active.update(&state.db).await?;
-    }
-
-    let hearings = load_hearings(&state, user.0.id, &call).await?;
+    let hearings = load_hearings(&state, user.0.id, &promotion.contact.callsign).await?;
     Ok(StationHearings { hearings })
 }
 
@@ -341,7 +310,7 @@ async fn own_callsign(state: &AppState, user_id: i64) -> Result<Option<String>, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use chrono::{TimeZone, Utc};
 
     fn session(label: Option<&str>) -> sessions::Model {
         sessions::Model {

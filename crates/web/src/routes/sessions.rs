@@ -7,6 +7,7 @@
 use actix_web::{get, web};
 use askama::Template;
 use askama_web::WebTemplate;
+use sea_orm::sea_query::{Expr, Func, SimpleExpr};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
 use crate::auth::session::{AuthedUser, SessionUser};
@@ -56,38 +57,66 @@ async fn load_sessions(state: &AppState, user_id: i64) -> Result<Vec<SessionView
         .all(&state.db)
         .await?;
 
-    let mut views = Vec::with_capacity(rows.len());
-    for s in rows {
-        // Counted per session rather than joined: the list is short, and this
-        // keeps the query obvious.
-        let observations_of = observations::Entity::find()
-            .filter(observations::Column::UserId.eq(user_id))
-            .filter(observations::Column::SessionId.eq(s.id))
-            .all(&state.db)
-            .await?;
-        let unique: std::collections::HashSet<&str> = observations_of
-            .iter()
-            .map(|o| o.callsign.as_str())
-            .collect();
+    // Totals for the whole page in one grouped query. Counting per session would
+    // mean a query per row, which is fine at three sessions and not at two
+    // hundred — and it would pull every observation body across just to count it.
+    let session_ids: Vec<i64> = rows.iter().map(|s| s.id).collect();
+    let totals = observation_totals(state, user_id, &session_ids).await?;
 
-        views.push(SessionView {
-            id: s.id,
-            title: session_title(&s),
-            kind: s.kind.clone(),
-            started: s.started_at.format("%Y-%m-%d %H:%M").to_string(),
-            duration: duration_text(&s),
-            band: dash(s.band.clone()),
-            mode: dash(s.mode.clone()),
-            frequency: s
-                .frequency_mhz
-                .map(|f| format!("{f:.3}"))
-                .unwrap_or_else(|| "—".to_string()),
-            operator: dash(s.operator_callsign.clone()),
-            heard: observations_of.len() as u64,
-            unique_stations: unique.len() as u64,
-        });
+    Ok(rows
+        .into_iter()
+        .map(|s| {
+            let (heard, unique_stations) = totals.get(&s.id).copied().unwrap_or((0, 0));
+            SessionView {
+                id: s.id,
+                title: session_title(&s),
+                kind: s.kind.clone(),
+                started: s.started_at.format("%Y-%m-%d %H:%M").to_string(),
+                duration: duration_text(&s),
+                band: dash(s.band.clone()),
+                mode: dash(s.mode.clone()),
+                frequency: s
+                    .frequency_mhz
+                    .map(|f| format!("{f:.3}"))
+                    .unwrap_or_else(|| "—".to_string()),
+                operator: dash(s.operator_callsign.clone()),
+                heard,
+                unique_stations,
+            }
+        })
+        .collect())
+}
+
+/// `(total hearings, distinct callsigns)` per session, for a page of sessions.
+async fn observation_totals(
+    state: &AppState,
+    user_id: i64,
+    session_ids: &[i64],
+) -> Result<std::collections::HashMap<i64, (u64, u64)>, AppError> {
+    if session_ids.is_empty() {
+        return Ok(Default::default());
     }
-    Ok(views)
+    let rows: Vec<(i64, i64, i64)> = observations::Entity::find()
+        .select_only()
+        .column(observations::Column::SessionId)
+        .column_as(observations::Column::Id.count(), "heard")
+        .column_as(
+            SimpleExpr::FunctionCall(Func::count_distinct(Expr::col(
+                observations::Column::Callsign,
+            ))),
+            "unique_stations",
+        )
+        .filter(observations::Column::UserId.eq(user_id))
+        .filter(observations::Column::SessionId.is_in(session_ids.to_vec()))
+        .group_by(observations::Column::SessionId)
+        .into_tuple()
+        .all(&state.db)
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(id, heard, unique)| (id, (heard.max(0) as u64, unique.max(0) as u64)))
+        .collect())
 }
 
 #[derive(Template, WebTemplate)]

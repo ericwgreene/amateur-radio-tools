@@ -480,6 +480,67 @@ async fn promoting_from_the_page_creates_a_contact() {
     assert_eq!(test::call_service(&app, theirs).await.status(), 404);
 }
 
+/// The sessions list counts hearings and distinct stations with one grouped
+/// query rather than a query per row. Aggregation is easy to get subtly wrong,
+/// so pin the numbers — including a session with nothing in it.
+#[actix_web::test]
+async fn sessions_list_counts_hearings_and_distinct_stations() {
+    let state = test_state().await;
+    let user = seed_user(&state.db, "op@example.com").await;
+    let busy = seed_session(&state.db, user.id, "busy").await;
+    let quiet = seed_session(&state.db, user.id, "quiet").await;
+
+    // Three hearings across two distinct callsigns.
+    seed_observation(&state.db, user.id, busy.id, "KR4NRC").await;
+    seed_observation(&state.db, user.id, busy.id, "KR4NRC").await;
+    seed_observation(&state.db, user.id, busy.id, "W1AW").await;
+
+    // Another user's rows must not leak into either count.
+    let other = seed_user(&state.db, "other@example.com").await;
+    let theirs = seed_session(&state.db, other.id, "theirs").await;
+    seed_observation(&state.db, other.id, theirs.id, "VE3XYZ").await;
+
+    let app = test_app!(state);
+    let cookie = login!(app, user.id, false);
+    let req = test::TestRequest::get()
+        .uri("/sessions")
+        .cookie(cookie)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+    let body = test::read_body(resp).await;
+    let body = String::from_utf8_lossy(&body);
+
+    // The template wraps cell values in whitespace, so compare against a
+    // whitespace-free copy of each row.
+    let squashed: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+    let rows: Vec<&str> = squashed.split("<tr").collect();
+    let row_for = |id: i64| {
+        rows.iter()
+            .find(|r| r.contains(&format!("/sessions/{id}\"")))
+            .copied()
+            .unwrap_or_else(|| panic!("no row for session {id}"))
+    };
+
+    // The two count columns are stations-then-heard, so assert the pair in order:
+    // a swapped column would still contain both numbers individually.
+    let busy_row = row_for(busy.id);
+    assert!(
+        busy_row.contains(">2</td>") && busy_row.contains(">3</td>"),
+        "expected 2 distinct stations and 3 hearings: {busy_row}"
+    );
+    assert!(
+        busy_row.find(">2</td>") < busy_row.find(">3</td>"),
+        "stations column comes before hearings: {busy_row}"
+    );
+
+    let quiet_row = row_for(quiet.id);
+    assert!(
+        quiet_row.matches(">0</td>").count() >= 2,
+        "a session with no hearings still renders zeroes: {quiet_row}"
+    );
+}
+
 #[actix_web::test]
 async fn sessions_page_and_detail_render() {
     let state = test_state().await;
